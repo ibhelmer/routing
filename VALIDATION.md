@@ -2,6 +2,72 @@
 
 Copyright 2026 Ib Helmer Nielsen. Licensed under Apache-2.0.
 
+## Version 1.3.1 - non-TTL drop diagnostics and packet setup
+
+Validated on 2 October 2026 with CPython 3.13.5, Linux, Tkinter/Tk 8.6 and Xvfb.
+The mounted v1.3.0 archive was checked against the connected repository's current
+main at commit `49ac4d6ca18dec3e4ed8ee4bcc31b1afbbbdf7d3` before editing. Its
+application Git blob was `40d615e91e284e9286e0eb87d1ceb8f15811e57b`.
+
+### Diagnosis and scope
+
+The user's exact graph and drop message were not supplied. The following old
+behavior was reproduced before editing:
+
+| Setup | Outcome | Remaining TTL |
+|---|---|---:|
+| Default graph immediately after startup | No route at A | 16 |
+| SPF finished only at A | A-C, then no route at C | 15 |
+| SPF finished at all six routers | A-C-B-D-E-F delivered | 11 |
+| Disable D-E, retain old tables | A-C-B-D, then failed link | 13 |
+| Full tables, initial TTL 3 | A-C-B, TTL expiry | 0 |
+
+All 106 previous tests passed before editing. These cases establish why a packet
+may legitimately drop with TTL remaining; they do not establish the specific
+cause of the user's report. No Dijkstra distance, next-hop selection, or TTL
+forwarding rule was changed. The remedy is an explicit preflight choice and
+unambiguous diagnostics, not silently suppressing real packet loss.
+
+### Actual test results
+
+```text
+DISPLAY=:99 RUN_GUI_TESTS=1 python -m unittest -v
+Ran 130 tests
+OK
+
+python -m unittest -q
+Ran 130 tests
+OK (skipped=52)
+```
+
+There are 78 non-GUI tests and 52 opt-in GUI tests. All previous test files remain
+unchanged. The new 10 model tests cover startup and partial-SPF drops, all 36
+default source/destination pairs without SPF during forwarding, stale no-route,
+unknown/isolated destinations, link-down versus missing-next-hop diagnostics,
+reconvergence, TTL 1 local delivery, initial TTL retention and usable stale routes.
+
+The 14 new real-Tk tests cover Yes/No/Cancel preflight decisions, retaining old
+packets and unfinished SPF, local/current-table cases without prompts, deliberate
+stale-link failures, explicit rebuilding without re-enabling links, edited TTL
+inputs versus in-flight TTL, save/load followed by setup, historical trace rows,
+modal ownership, isolated destinations and compact-screen diagnostics.
+
+Native prompt responses are mocked. Tests exercise actual Tk widgets and
+callback code; no real packets are sent. Full-suite runtime was approximately
+18 seconds in this environment. All Python sources are also checked using
+Python 3.10 grammar parsing; older Python interpreters were not executed.
+
+### Visual checks and limitations
+
+The real running application was captured at 1440 x 960 and 1180 x 740 with the
+partial-SPF drop at C. Initial TTL, live TTL 15, the NO_SPF explanation and selected
+trace row remain visible. On short screens the packet trace shows one row and
+can be scrolled; the supplementary graph-editing hint and terminal path summary
+are omitted to retain graph space. The editing help remains in Guide.
+
+Native Windows/macOS execution, window icons and native confirmation dialogs
+were not tested. Existing graph persistence, branding and copyright are retained.
+
 ## Version 1.3.0 - About dialog, IHN icon and UCN branding
 
 Validated on 2 October 2026 with CPython 3.13.5, Tkinter/Tk 8.6 on Linux and an

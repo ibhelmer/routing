@@ -44,7 +44,7 @@ import webbrowser
 __author__ = "Ib Helmer Nielsen"
 __copyright__ = "Copyright 2026 Ib Helmer Nielsen"
 __license__ = "Apache-2.0"
-__version__ = "1.3.0"
+__version__ = "1.3.1"
 
 APP_NAME = "Dijkstra Routing Lab"
 REPOSITORY_URL = "https://github.com/ibhelmer/routing"
@@ -585,6 +585,7 @@ class Packet:
     destination: ipaddress.IPv4Address
     ttl: int = 16
     current: str = field(init=False)
+    initial_ttl: int = field(init=False)
     path: list[str] = field(init=False)
     total_cost: int = 0
     done: bool = False
@@ -594,6 +595,7 @@ class Packet:
         self.destination = ipaddress.IPv4Address(self.destination)
         if isinstance(self.ttl, bool) or not isinstance(self.ttl, int) or not 1 <= self.ttl <= 255:
             raise ValueError("TTL must be an integer from 1 to 255.")
+        self.initial_ttl = self.ttl
         self.current = self.source
         self.path = [self.source]
 
@@ -608,6 +610,7 @@ class ForwardDecision:
     ttl_after: int
     cost: int
     message: str
+    reason_code: str = ""
 
 
 def forward_one_hop(engine: RoutingEngine, packet: Packet) -> ForwardDecision:
@@ -625,22 +628,43 @@ def forward_one_hop(engine: RoutingEngine, packet: Packet) -> ForwardDecision:
     route = engine.lookup(router, packet.destination)
     prefix = str(route.prefix) if route else "--"
 
-    def stop(kind: str, message: str) -> ForwardDecision:
+    def stop(kind: str, message: str, reason_code: str = "") -> ForwardDecision:
         packet.done, packet.outcome = True, kind
-        return ForwardDecision(kind, router, prefix, None, ttl_before, packet.ttl, 0, message)
+        # A failed link still has an installed next hop worth showing in diagnostics.
+        next_hop = route.next_hop if route else None
+        return ForwardDecision(kind, router, prefix, next_hop, ttl_before,
+                               packet.ttl, 0, message, reason_code)
 
     if route is None:
-        return stop("drop", f"DROP at {router}: no installed route to {packet.destination}.")
+        status = engine.table_status(router)
+        if status == "local only":
+            reason = "NO_SPF"
+            hint = (f"{router} has not completed SPF; it knows only its own loopback. "
+                    "Build all now calculates tables at intermediate routers as well.")
+        elif status == "STALE":
+            reason = "STALE_NO_ROUTE"
+            hint = "This table is from an older topology. Rebuild the routing tables."
+        else:
+            reason = "NO_ROUTE"
+            hint = ("The table is current. Check the destination IP and enabled links; "
+                    "rebuilding alone cannot connect an isolated destination.")
+        return stop("drop", f"DROP at {router} [{reason}]: no installed route to "
+                    f"{packet.destination}. TTL remains {packet.ttl} (not a TTL expiry). " + hint, reason)
     if route.next_hop is None:
         return stop("deliver", f"DELIVER at {router}: {packet.destination} is this router's "
                     f"local loopback. TTL remains {packet.ttl}.")
     if packet.ttl <= 1:
         packet.ttl = 0
-        return stop("drop", f"DROP at {router}: TTL expired before forwarding.")
+        return stop("drop", f"DROP at {router} [TTL_EXPIRED]: TTL expired before forwarding "
+                    f"to {route.next_hop} ({ttl_before} -> 0). Increase Initial TTL, then "
+                    "create a NEW packet; changing the input does not change an existing packet.",
+                    "TTL_EXPIRED")
     link = engine.network.links.get(tuple(sorted((router, route.next_hop))))
     if link is None or not link.enabled:
-        return stop("drop", f"DROP at {router}: installed next hop {route.next_hop} uses "
-                    "an unavailable link. Recalculate the routing tables.")
+        reason = "INVALID_NEXT_HOP" if link is None else "LINK_DOWN"
+        return stop("drop", f"DROP at {router} [{reason}]: installed next hop {route.next_hop} "
+                    f"uses an unavailable link. TTL remains {packet.ttl} (not a TTL expiry). "
+                    "Restore the link or rebuild the tables to use an available alternative.", reason)
     packet.ttl -= 1
     packet.current = route.next_hop
     packet.path.append(route.next_hop)
@@ -716,6 +740,7 @@ class RoutingDemo:
         self.last_decision: ForwardDecision | None = None
         self.packet_sequence = 0
         self.trace_count = 0
+        self.trace_decisions: dict[str, ForwardDecision] = {}
         self.step_count = 0
         self.event_count = 0
         self.router_selectors: list = []
@@ -740,6 +765,7 @@ class RoutingDemo:
         self.link_up = tk.BooleanVar(value=True)
         self.status_text = tk.StringVar()
         self.spf_note = tk.StringVar(value="Press New SPF or Step SPF to begin at router A.")
+        self.packet_state = tk.StringVar(value="No packet | Initial TTL applies to the next new packet.")
         self.packet_note = tk.StringVar(value="Build the routing tables, then create a packet.")
         self.table_note = tk.StringVar()
         self.work_title = tk.StringVar(value="DIJKSTRA WORKING STATE | no calculation yet")
@@ -893,10 +919,11 @@ class RoutingDemo:
         self.canvas.bind("<ButtonRelease-1>", self._end_drag)
         ttk.Label(left, text="Final / SPF tree: green   |   Comparing: amber   |   Packet: purple   |   Down: dashed",
                   style="Small.TLabel").grid(row=1, column=0, sticky="w", pady=(4, 0))
-        ttk.Label(left, text="Double-click empty space to add a router; drag to move. Click a cost to edit; right-click a link to toggle.",
-                  style="Small.TLabel").grid(row=2, column=0, sticky="w", pady=(0, 5))
+        self.graph_hint = ttk.Label(left, text="Double-click empty space to add a router; drag to move. Click a cost to edit; right-click a link to toggle.",
+                                    style="Small.TLabel")
+        self.graph_hint.grid(row=2, column=0, sticky="w", pady=(0, 5))
 
-        packet_box = ttk.LabelFrame(left, text="DATA PLANE  |  hop-by-hop forwarding", padding=8)
+        packet_box = ttk.LabelFrame(left, text="DATA PLANE  |  hop-by-hop forwarding", padding=6)
         packet_box.grid(row=3, column=0, sticky="ew", padx=(0, 8), pady=(0, 5))
         row = ttk.Frame(packet_box)
         row.pack(fill="x")
@@ -908,8 +935,9 @@ class RoutingDemo:
         target.bind("<<ComboboxSelected>>", self.select_target)
         ttk.Label(row, text="Dest. IP").pack(side="left")
         ttk.Entry(row, textvariable=self.destination_ip, width=14).pack(side="left", padx=(4, 10))
-        ttk.Label(row, text="TTL").pack(side="left")
-        ttk.Spinbox(row, textvariable=self.ttl_value, from_=1, to=255, width=4).pack(side="left", padx=4)
+        ttk.Label(row, text="Initial TTL").pack(side="left", padx=(10, 0))
+        self.initial_ttl_spinbox = ttk.Spinbox(row, textvariable=self.ttl_value, from_=1, to=255, width=4)
+        self.initial_ttl_spinbox.pack(side="left", padx=4)
         row = ttk.Frame(packet_box)
         row.pack(fill="x", pady=(6, 0))
         ttk.Button(row, text="New packet", command=self.new_packet).pack(side="left", padx=(0, 4))
@@ -918,15 +946,20 @@ class RoutingDemo:
                                              style="Accent.TButton")
         self.packet_play_button.pack(side="left", padx=4)
         ttk.Button(row, text="Stop packet", command=self.stop_packet).pack(side="left", padx=4)
+        self.packet_state_label = ttk.Label(packet_box, textvariable=self.packet_state,
+                                             style="Small.TLabel", wraplength=620)
+        self.packet_state_label.pack(fill="x", pady=(2, 0))
         self.packet_label = ttk.Label(packet_box, textvariable=self.packet_note,
                                       wraplength=650, justify="left", style="Small.TLabel")
         self.packet_label.pack(fill="x", pady=(6, 0))
         self.trace_tree = self._tree(left,
             [("n", "#", 30), ("at", "At", 35), ("prefix", "Matched prefix", 135),
-             ("action", "Decision", 220), ("ttl", "TTL", 70)], height=6)
+             ("action", "Decision / reason", 220), ("ttl", "TTL", 70)], height=6)
         self.trace_tree.grid(row=4, column=0, sticky="ew", padx=(0, 8))
         self.trace_tree.tag_configure("drop", foreground=self.RED)
         self.trace_tree.tag_configure("deliver", foreground=self.GREEN)
+        self.trace_tree.bind("<<TreeviewSelect>>", self._show_trace_decision)
+        self.trace_tree.bind("<Configure>", self._keep_trace_selection_visible)
 
         self.tabs = ttk.Notebook(right)
         self.tabs.pack(fill="both", expand=True)
@@ -985,7 +1018,7 @@ class RoutingDemo:
                   "Next hop = FIRST router after the root, used for forwarding.",
                   style="Small.TLabel").grid(row=7, column=0, sticky="w")
         live.bind("<Configure>", lambda event: self._wrap_live(event.width), add="+")
-        left.bind("<Configure>", lambda event: self.packet_label.configure(wraplength=max(400, event.width - 40)))
+        left.bind("<Configure>", self._wrap_packet_labels)
 
         all_tables.rowconfigure(1, weight=1)
         ttk.Label(all_tables, text="INSTALLED TABLES | one independent SPF per router",
@@ -1206,7 +1239,14 @@ class RoutingDemo:
             return
         compact = self.root.winfo_height() < 900
         self.compact = compact
-        self.trace_tree.configure(height=2 if self.root.winfo_height() < 820 else 3 if compact else 4)
+        short = self.root.winfo_height() < 820
+        self.trace_tree.configure(height=1 if short else 3 if compact else 4)
+        # Preserve graph space on short screens; the same editing tips remain in Guide.
+        if short:
+            self.graph_hint.grid_remove()
+        else:
+            self.graph_hint.grid()
+        self._show_trace_decision()
         # Keep the editable packet controls usable on 1280/1366-pixel laptops.
         # Users may still drag the sash; the ratio resets only on window resize.
         if getattr(self, "_last_body_width", None) != event.width:
@@ -1217,6 +1257,11 @@ class RoutingDemo:
     def _wrap_live(self, width: int) -> None:
         for label in (self.spf_label, self.table_label):
             label.configure(wraplength=max(350, width - 25))
+
+    def _wrap_packet_labels(self, event) -> None:
+        width = max(350, event.width - 40)
+        self.packet_label.configure(wraplength=width)
+        self.packet_state_label.configure(wraplength=width)
 
     def _log(self, message: str) -> None:
         self.event_count += 1
@@ -1585,13 +1630,61 @@ class RoutingDemo:
         self.draw_network()
         self.tabs.select(self.live_tab)
 
+    def _confirm_packet_tables(self, packet: Packet) -> bool:
+        """Explicit setup choice BEFORE injection, never SPF inside forwarding.
+
+        Do not silently repair stale tables: they are useful for failure lessons.
+        Checking table metadata is not a shortest-path calculation or packet trace.
+        """
+        if str(packet.destination) == self.network.routers[packet.source].address:
+            return True  # Local loopback delivery does not require network-wide SPF.
+        missing = [name for name in sorted(self.network.routers)
+                   if self.engine.table_status(name) == "local only"]
+        stale = [name for name in sorted(self.network.routers)
+                 if self.engine.table_status(name) == "STALE"]
+        if not missing and not stale:
+            return True
+
+        def summarize(names):
+            return ", ".join(names[:12]) + (f" ... ({len(names)} routers)" if len(names) > 12 else "")
+
+        details = []
+        if missing:
+            details.append("SPF not completed at: " + summarize(missing))
+        if stale:
+            details.append("Out-of-date tables at: " + summarize(stale))
+        # Native dialogs run a nested Tk loop, so pause jobs before asking.
+        if not self._pause_for_file_dialog():
+            return False
+        answer = messagebox.askyesnocancel(
+            "Routing tables not ready",
+            "\n".join(details) + "\n\nA packet may be dropped even with TTL remaining. "
+            "Each intermediate router needs its OWN installed routing table.\n\n"
+            "Yes: build all routing tables BEFORE creating the packet.\n"
+            "No: use current tables unchanged (intentional failure experiment).\n"
+            "Cancel: return without creating a packet.\n\n"
+            "Rebuilding cannot repair a disconnected graph or an unknown destination IP.",
+            parent=self.root)
+        if answer is None:
+            return False
+        if answer:
+            self.build_all()
+        else:
+            self._log("PACKET SETUP: explicitly using incomplete/stale installed tables; no automatic SPF.")
+        return True
+
     def new_packet(self) -> bool:
+        if ((self.about_window is not None and self.about_window.winfo_exists()) or
+                (self.editor_window is not None and self.editor_window.winfo_exists())):
+            return False
         try:
             destination = ipaddress.IPv4Address(self.destination_ip.get().strip())
             packet = Packet(self.packet_source.get(), destination, int(self.ttl_value.get()))
         except (ValueError, ipaddress.AddressValueError):
             messagebox.showerror("Invalid packet", "Enter a valid IPv4 address and TTL from 1 to 255.",
                                  parent=self.root)
+            return False
+        if not self._confirm_packet_tables(packet):
             return False
         self._pause_spf(clear_queue=True)
         # Incomplete SPF work is abandoned, never silently installed.
@@ -1603,6 +1696,7 @@ class RoutingDemo:
         self.packet = packet
         self.packet_sequence += 1
         self.trace_count = 0
+        self.trace_decisions.clear()
         self.trace_tree.delete(*self.trace_tree.get_children())
         self.inspector.set(packet.source)
         self.lookup_router = packet.source
@@ -1650,11 +1744,14 @@ class RoutingDemo:
         self.inspector.set(decision.router)
         self.highlight_prefix = decision.prefix
         self.trace_count += 1
-        action = f"Forward -> {decision.next_hop} (+{decision.cost})" if decision.kind == "forward" else decision.kind.upper()
+        action = (f"Forward -> {decision.next_hop} (+{decision.cost})" if decision.kind == "forward" else
+                  f"DROP: {decision.reason_code}" if decision.kind == "drop" else "DELIVER")
+        self.trace_decisions[str(self.trace_count)] = decision
         self.trace_tree.insert("", "end", iid=str(self.trace_count), values=(
             self.trace_count, decision.router, decision.prefix, action,
             f"{decision.ttl_before} -> {decision.ttl_after}"), tags=(decision.kind,))
         self.trace_tree.see(str(self.trace_count))
+        self.trace_tree.selection_set(str(self.trace_count))
         self.packet_note.set(decision.message)
         self._log(f"PACKET #{self.packet_sequence}: {decision.message}")
         self._refresh_all()
@@ -1692,7 +1789,36 @@ class RoutingDemo:
         self.packet_note.set("Packet stopped. Create a new packet to restart from its source.")
         self._refresh_all()
 
+    def _keep_trace_selection_visible(self, event=None) -> None:
+        selection = self.trace_tree.selection()
+        if selection:
+            self.trace_tree.see(selection[0])
+
+    def _show_trace_decision(self, event=None) -> None:
+        selection = self.trace_tree.selection()
+        decision = self.trace_decisions.get(selection[0]) if selection else None
+        if decision is not None:
+            # Store the original message instead of re-evaluating a historical hop.
+            message = decision.message
+            if (not self.compact and self.packet is not None and self.packet.done
+                    and selection[0] == str(self.trace_count)):
+                message += (f"\nPath: {' -> '.join(self.packet.path)} | "
+                            f"{len(self.packet.path) - 1} hops | total link cost {self.packet.total_cost}")
+            self.packet_note.set(message)
+
+    def _refresh_packet_state(self) -> None:
+        packet = self.packet
+        if packet is None:
+            self.packet_state.set("No packet | Initial TTL applies to the next new packet.")
+        else:
+            state = ("in transit" if self.packet_animating else packet.outcome.upper())
+            self.packet_state.set(
+                f"Packet #{self.packet_sequence}: {packet.source} -> {packet.destination} | "
+                f"At {packet.current} | TTL now {packet.ttl} (initial {packet.initial_ttl}) | {state}")
+
     def _clear_packet_display(self) -> None:
+        self.trace_decisions.clear()
+        self._refresh_packet_state()
         self.trace_tree.delete(*self.trace_tree.get_children())
         self.packet_note.set("Build the routing tables, then create a packet.")
         self.trace_count = 0
@@ -1784,6 +1910,7 @@ class RoutingDemo:
         self.all_tree.yview_moveto(yview)
 
     def _refresh_status(self) -> None:
+        self._refresh_packet_state()
         current = sum(self.engine.table_status(name) == "current" for name in self.network.routers)
         activity = "SPF playing" if self.spf_auto else "packet playing" if self.packet_auto else "ready / paused"
         self.status_text.set(f"Topology {self.network.revision}  |  SPF tables {current}/{len(self.network.routers)}  |  "
@@ -2063,6 +2190,16 @@ Use Add link to connect any two routers. New routers appear immediately in Root,
 Drag a router to change its drawing position. Moving a router does not change link costs or require SPF. Duplicate names/IPs, self-links and duplicate links are rejected.
 
 Try adding G (10.0.0.7) connected to F with cost 3. Build all tables, then send A -> G: A -> C -> B -> D -> E -> F -> G, cost 13.
+
+PACKET DROPS AND TTL
+
+Initial TTL is used when you create a NEW packet. TTL now in the packet status is the remaining value; editing Initial TTL does not alter a packet already in progress.
+
+Before creating a non-local packet, the program warns when any router has not completed SPF or has an out-of-date table. Yes builds all tables before injection. No explicitly uses the old tables for a failure experiment. Cancel returns without creating a packet. Forwarding itself never runs Dijkstra.
+
+Drop reasons appear in the trace: NO_SPF (this router has not completed SPF), STALE_NO_ROUTE (old table has no entry), NO_ROUTE (current table has no entry), LINK_DOWN (installed next hop uses a failed link), INVALID_NEXT_HOP (no link to installed next hop), or TTL_EXPIRED. A positive TTL does not guarantee a route exists. Select a trace row to read its full explanation.
+
+After loading or editing a graph, use Build all now. A disconnected destination or unknown IP still needs its topology/address corrected; increasing TTL cannot repair it.
 
 SAVING AND LOADING GRAPHS
 

@@ -4,7 +4,7 @@
 
 Repository: [ibhelmer/routing](https://github.com/ibhelmer/routing)
 
-**Version 1.3.0:** adds an About dialog, IHN application icons and UCN branding, with a clearer teal-and-white layout. Editable routers, links, saved graphs and hop-by-hop packet forwarding remain available.
+**Version 1.3.1:** explains packet drops, checks incomplete/stale tables before injection, and separates Initial TTL from the packet's live remaining TTL. About, IHN/UCN branding, editable and saved graphs remain available.
 
 An interactive Python teaching example that makes two different activities visible:
 
@@ -13,6 +13,73 @@ An interactive Python teaching example that makes two different activities visib
 **Data plane:** forward a simulated IP packet using a fresh lookup in the current router's installed table at every hop.
 
 The forwarding code does **not** run Dijkstra and does **not** consume a precomputed end-to-end path. The demonstration is self-contained; it sends no real packets and changes no operating-system network settings.
+
+## Packet drops with TTL remaining
+
+A positive TTL is not a guarantee of delivery. Each intermediate router needs an
+installed matching route and a working link to its next hop. In the default
+example, calculating only A's table sends a packet to C, where it is correctly
+dropped with **TTL 15** because C has not completed SPF. **Build all now** calculates
+a table at every router. The default A-C-B-D-E-F packet then arrives with TTL 11
+when its initial TTL was 16.
+
+### Check before creating a packet
+
+After graph loading, partial SPF or topology edits, **New packet**, **Next hop**
+when it creates a packet, and **Play packet** when it creates a packet show a
+confirmation if any router has missing or stale SPF tables:
+
+- **Yes:** build all tables before creating the new packet.
+- **No:** keep the installed tables unchanged for an intentional failure lesson.
+- **Cancel:** return without creating a packet or discarding existing work.
+
+This checks table metadata, not an end-to-end route. Local loopback delivery
+needs no network-wide SPF. Current tables do not trigger the prompt. Rebuilding
+is explicit setup, not a hidden calculation in `forward_one_hop()`. It neither
+re-enables failed links nor invents connectivity to isolated destinations.
+Playback is paused while the confirmation is open. Cancelling retains any
+existing packet, installed tables and unfinished SPF iterator/queue.
+
+### Read the actual packet TTL and the drop reason
+
+**Initial TTL** is an input for the next newly created packet. Changing it does
+not change a packet already in progress. **TTL now** in the live packet status
+shows that packet's remaining TTL and its original starting value. It also
+identifies the actual packet source, destination, current router and outcome,
+which may differ from controls edited in preparation for the next packet.
+
+The trace's **Decision / reason** column distinguishes:
+
+| Reason | Meaning and next step |
+|---|---|
+| `NO_SPF` | The dropping router has not completed SPF. Use Build all now. |
+| `STALE_NO_ROUTE` | An older installed table has no destination entry. Rebuild. |
+| `NO_ROUTE` | A current table has no entry. Check destination IP and enabled connectivity. |
+| `LINK_DOWN` | The installed next hop uses a disabled link. Restore it or recalculate an alternate route. |
+| `INVALID_NEXT_HOP` | The installed next hop has no physical link. Relevant to deliberately modified model tables. |
+| `TTL_EXPIRED` | Remaining TTL was 1 and becomes 0 before forwarding. Increase Initial TTL and create a NEW packet. |
+
+**Select a trace row** to read its full explanation. The Event log records the
+same messages. Non-TTL drops explicitly say that TTL remains unchanged; a
+failed link retains its attempted next hop in `ForwardDecision.next_hop`.
+`ForwardDecision.reason_code` exposes the distinction to headless callers.
+
+Stale tables are not automatically rejected: a packet can still be delivered
+when its installed route remains usable. Unknown IPs and disconnected graphs
+can still cause legitimate non-TTL drops even after a full recalculation.
+The existing TTL model is unchanged: decrement per forwarding operation, not
+per unit of link cost or animation time; local loopback delivery preserves TTL.
+See [RFC 1812](https://www.rfc-editor.org/rfc/rfc1812.html), sections 4.2.2.9,
+5.2.4.1 and 5.3.1 for the corresponding IPv4 forwarding principles.
+
+### Reproduce the reported symptom
+
+Reset the default graph, finish SPF only at A, and create a packet for F. Choose
+**No** in the new confirmation to intentionally use incomplete tables. The
+packet follows A-C, then shows `DROP: NO_SPF`, with `TTL now 15 (initial 16)`.
+Build all tables and create a new packet: it arrives at F with TTL 11.
+This reproduces one explanation for the reported symptom, not a claim that the
+user's exact saved graph or sequence of clicks was available for debugging.
 
 ## About, logos and the application icon
 
@@ -372,10 +439,10 @@ TTL decreases on forwarding and not on local delivery. Drops are logged, but no 
 
 ## Verification
 
-There are **106 tests**: **68 non-GUI tests** and **38 opt-in Tk GUI tests**. The previous 86 tests are unchanged. `test_branding.py` adds 5 metadata/asset tests and 15 GUI checks for About, logos, keyboard actions, browser/clipboard behavior, modal ownership and state preservation.
+There are **130 tests**: **78 non-GUI tests** and **52 opt-in Tk GUI tests**. The previous 106 tests remain unchanged. `test_packet_diagnostics.py` adds 10 model tests and 14 GUI checks for drop reasons, explicit preflight choices, live TTL, state preservation and compact-screen visibility.
 
 ```bash
-# No graphical display required: 68 pass, 38 GUI checks are skipped.
+# No graphical display required: 78 pass, 52 GUI checks are skipped.
 python -m unittest -v
 
 # With a working graphical desktop:
@@ -412,6 +479,7 @@ The implementation is an original teaching example based on the principles below
 | `test_topology_editor.py` | 15 additional model tests and 10 opt-in graphical tests |
 | `test_graph_storage.py` | 21 storage/model tests and 13 opt-in graphical tests |
 | `test_branding.py` | 5 asset/metadata tests and 15 opt-in graphical tests |
+| `test_packet_diagnostics.py` | 10 drop/TTL model tests and 14 opt-in graphical tests |
 | `assets/` | IHN PNG/ICO, original UCN SVG, Tk-compatible PNG and provenance |
 | `examples/seven_router.graph.json` | Loadable example with G connected to F at cost 3 |
 | `run_demo.bat` | Windows launcher |
