@@ -1,0 +1,13 @@
+# Copyright 2026 Ib Helmer Nielsen
+# SPDX-License-Identifier: Apache-2.0
+
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+routing_tables.json
+.DS_Store
+Thumbs.db
