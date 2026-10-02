@@ -8,3 +8,9 @@ routing-table construction, and hop-by-hop IP packet forwarding.
 
 The source code and documentation are licensed under the Apache License,
 Version 2.0. See LICENSE for the full license text.
+
+Branding assets:
+The IHN mark is reused from Ib Helmer Nielsen's existing project artwork.
+The UCN name and logo remain UCN's marks and are not relicensed by this
+project's Apache-2.0 software license. Display of the UCN logo does not imply
+institutional endorsement. See assets/README.md for provenance and details.

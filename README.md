@@ -4,7 +4,7 @@
 
 Repository: [ibhelmer/routing](https://github.com/ibhelmer/routing)
 
-**Version 1.2.0:** save and load editable graphs, including node positions; keep multiple classroom topologies as JSON files. Adds unsaved-change protection and imports of earlier table exports.
+**Version 1.3.0:** adds an About dialog, IHN application icons and UCN branding, with a clearer teal-and-white layout. Editable routers, links, saved graphs and hop-by-hop packet forwarding remain available.
 
 An interactive Python teaching example that makes two different activities visible:
 
@@ -13,6 +13,48 @@ An interactive Python teaching example that makes two different activities visib
 **Data plane:** forward a simulated IP packet using a fresh lookup in the current router's installed table at every hop.
 
 The forwarding code does **not** run Dijkstra and does **not** consume a precomputed end-to-end path. The demonstration is self-contained; it sends no real packets and changes no operating-system network settings.
+
+## About, logos and the application icon
+
+Click **About** in the upper-right corner, choose **Help > About Dijkstra Routing Lab...**,
+or press **F1**. The dialog explains the teaching purpose, route calculation,
+routing-table construction, packet forwarding, and the limits of the simulation.
+It displays the current version, **Copyright 2026 Ib Helmer Nielsen**, the
+Apache-2.0 software license and the repository address:
+
+**[https://github.com/ibhelmer/routing](https://github.com/ibhelmer/routing)**
+
+Use **Open GitHub** to open the repository in your browser, **Copy link** to copy
+its address, and **Close** or **Escape** to return to the application. The URL is
+also selectable. No browser opens automatically. If a browser is unavailable,
+the application displays the address instead of failing.
+
+Opening About pauses playback without discarding the current graph, installed
+routing tables, packet or unfinished SPF calculation. It does not mark the
+graph as modified. Resume playback explicitly afterwards. The dialog is
+scrollable/resizable and only one About window can be open at a time.
+
+The header contains the **existing IHN icon** and the **UCN logo** from the
+user's other projects. Branding uses the UCN symbol's dark teal as a starting
+point, with white panels, a separate topology toolbar and consistent buttons.
+The application requests the IHN window icon and includes a multi-size
+**`assets/ihn.ico`** for Windows. In a desktop Tkinter application, the equivalent
+of a website's favicon is the application/window icon; this does not change
+Explorer's icon for every Python file. Native icon behavior varies by platform
+and Tk/window manager; Windows and macOS were not run during this validation.
+
+Keep the **`assets`** folder alongside the Python file to display the logos.
+Assets load locally, work from any working directory, and require no additional
+Python packages. Running only the Python file still works, with text labels
+instead of unavailable logos. Asset problems are listed in **Event log**.
+See [asset provenance and logo rights](assets/README.md); the UCN mark is not
+covered by the project's software license.
+
+Check the version without opening a window:
+
+```powershell
+python dijkstra_routing_demo.py --version
+```
 
 ## Start the application
 
@@ -119,7 +161,7 @@ Router-to-router hops: 5
 
 The alternative A -> C -> E -> F uses only three hops but costs 2 + 7 + 2 = 11. The example minimizes the sum of link costs, not the hop count.
 
-Watch **Completed SPF runs** in the status bar: its value does not increase as the packet travels. A packet with TTL 6 can traverse the five links and arrive at F with TTL 1. Local loopback delivery does not consume another hop.
+Watch **SPF runs** in the status bar: its value does not increase as the packet travels. A packet with TTL 6 can traverse the five links and arrive at F with TTL 1. Local loopback delivery does not consume another hop.
 
 ## Add routers and links
 
@@ -282,7 +324,7 @@ Link cost is not animation duration. Use the **Delay** slider to slow down or sp
 
 ## Code map
 
-All application code is in `dijkstra_routing_demo.py` so that a single file is sufficient to run the example.
+All application code is in `dijkstra_routing_demo.py`; a single file remains sufficient to run the example. Keep the accompanying `assets` directory to display the IHN and UCN images; missing assets fall back to text labels.
 
 | Code | Responsibility |
 |---|---|
@@ -330,10 +372,10 @@ TTL decreases on forwarding and not on local delivery. Drops are logged, but no 
 
 ## Verification
 
-There are **86 tests**: **63 model/storage tests** and **23 opt-in Tk GUI tests**. The original 27 routing-model tests are unchanged; the topology-editor tests now exercise the new Save / Discard / Cancel reset prompt. `test_graph_storage.py` adds 21 storage tests and 13 GUI tests.
+There are **106 tests**: **68 non-GUI tests** and **38 opt-in Tk GUI tests**. The previous 86 tests are unchanged. `test_branding.py` adds 5 metadata/asset tests and 15 GUI checks for About, logos, keyboard actions, browser/clipboard behavior, modal ownership and state preservation.
 
 ```bash
-# No graphical display required: 63 pass, 23 GUI checks are skipped.
+# No graphical display required: 68 pass, 38 GUI checks are skipped.
 python -m unittest -v
 
 # With a working graphical desktop:
@@ -345,7 +387,7 @@ RUN_GUI_TESTS=1 xvfb-run -a python -m unittest -v
 
 On PowerShell, set `$env:RUN_GUI_TESTS = "1"` before invoking unittest to opt in to GUI tests. Native file-chooser return values and confirmation answers are mocked for repeatability; the Tk application, widgets, callbacks and routing model are real.
 
-New checks cover full save/load round-trips, 10 randomized 10-router networks and 1,000 before/after packet-route comparisons, malformed JSON, strict field validation, legacy imports, failed save cleanup, single-node/zero-link loading, state reset, pending-animation cancellation, Save As, dirty tracking, and cancellation/failure before replacing a graph. Loading the current file after saving pending edits is checked to keep disk and memory consistent.
+Storage checks cover full save/load round-trips, 10 randomized 10-router networks and 1,000 before/after packet-route comparisons, malformed JSON, strict field validation, legacy imports, failed save cleanup, single-node/zero-link loading, state reset, pending-animation cancellation, Save As, dirty tracking, and cancellation/failure before replacing a graph. Loading the current file after saving pending edits is checked to keep disk and memory consistent.
 
 See `VALIDATION.md` for the actual environment and limits of verification. Native Windows and macOS execution were not available for this update.
 
@@ -369,6 +411,8 @@ The implementation is an original teaching example based on the principles below
 | `test_dijkstra_routing_demo.py` | Original 27 model tests, including randomized reference comparisons |
 | `test_topology_editor.py` | 15 additional model tests and 10 opt-in graphical tests |
 | `test_graph_storage.py` | 21 storage/model tests and 13 opt-in graphical tests |
+| `test_branding.py` | 5 asset/metadata tests and 15 opt-in graphical tests |
+| `assets/` | IHN PNG/ICO, original UCN SVG, Tk-compatible PNG and provenance |
 | `examples/seven_router.graph.json` | Loadable example with G connected to F at cost 3 |
 | `run_demo.bat` | Windows launcher |
 | `README.md` | Installation, classroom walkthrough, experiments, and design notes |
@@ -383,4 +427,4 @@ Copyright 2026 Ib Helmer Nielsen.
 The source code and documentation are licensed under the
 [Apache License, Version 2.0](LICENSE). See [NOTICE](NOTICE) for project
 attribution. Source files also carry the `SPDX-License-Identifier: Apache-2.0`
-identifier.
+identifier. UCN logo rights remain with UCN; see [asset notices](assets/README.md).

@@ -39,11 +39,31 @@ import sys
 import tempfile
 import time
 from typing import Iterator
+import webbrowser
 
 __author__ = "Ib Helmer Nielsen"
 __copyright__ = "Copyright 2026 Ib Helmer Nielsen"
 __license__ = "Apache-2.0"
-__version__ = "1.2.0"
+__version__ = "1.3.0"
+
+APP_NAME = "Dijkstra Routing Lab"
+REPOSITORY_URL = "https://github.com/ibhelmer/routing"
+ASSET_DIR = Path(__file__).resolve().parent / "assets"
+ABOUT_SECTIONS = (
+    ("PURPOSE", "An interactive teaching application for understanding least-cost routing "
+     "and the difference between calculating routes and forwarding packets."),
+    ("01  CALCULATE ROUTES", "Follow Dijkstra's algorithm step by step. Inspect tentative "
+     "distances, settled routers, predecessor chains and the shortest-path tree."),
+    ("02  BUILD ROUTING TABLES", "Run a separate calculation at each router and see how "
+     "destination prefixes, costs and next hops become installed routing entries."),
+    ("03  FORWARD AND EXPERIMENT", "Watch each router look up a packet's destination, "
+     "choose its next hop and reduce TTL. Add routers, edit links, simulate failures, "
+     "and save or reload your classroom topologies."),
+    ("SCOPE", "A self-contained simulation: no real packets are sent and no operating-system "
+     "network settings are changed. This is not a full OSPF implementation; it omits "
+     "LSA flooding, ECMP and Ethernet/ARP."),
+)
+
 
 
 # ---------------------------------------------------------------------------
@@ -657,10 +677,12 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 class RoutingDemo:
-    BG = "#f1f5f9"
-    INK = "#16263b"
-    MUTED = "#526379"
-    BLUE = "#1d4ed8"
+    BG = "#f2f7f7"
+    INK = "#123740"
+    MUTED = "#536b73"
+    BLUE = "#006877"
+    BRAND = "#004250"
+    BORDER = "#cedee1"
     GREEN = "#087e66"
     AMBER = "#b45309"
     PURPLE = "#a21caf"
@@ -700,6 +722,11 @@ class RoutingDemo:
         self.drag_router: str | None = None
         self.drag_offset = (0.0, 0.0)
         self.editor_window = None
+        self.about_window = None
+        # Keep PhotoImage objects alive for the lifetime of their widgets.
+        self.brand_images: dict = {}
+        self.asset_warnings: list[str] = []
+        self._load_brand_assets()
 
         self.spf_root = tk.StringVar(value="A")
         self.inspector = tk.StringVar(value="A")
@@ -720,6 +747,8 @@ class RoutingDemo:
         self._build_ui()
         self._refresh_all()
         self._log("Ready. Each router initially knows only its own /32 loopback.")
+        for warning in self.asset_warnings:
+            self._log(warning)
         self.root.protocol("WM_DELETE_WINDOW", self.close)
 
     def _build_ui(self) -> None:
@@ -741,7 +770,25 @@ class RoutingDemo:
         style.configure("Small.TLabel", font=("Segoe UI", 9), foreground=self.MUTED)
         style.configure("Section.TLabel", font=("Segoe UI", 10, "bold"))
         style.configure("Accent.TButton", foreground="white", background=self.BLUE)
-        style.map("Accent.TButton", background=[("active", "#1e40af")])
+        style.map("Accent.TButton", background=[("active", self.BRAND), ("pressed", self.BRAND)],
+                  foreground=[("disabled", "#b8cacc"), ("!disabled", "white")])
+        style.configure("TButton", background="white", foreground=self.INK,
+                        bordercolor=self.BORDER, lightcolor="white", darkcolor=self.BORDER)
+        style.map("TButton", background=[("active", "#e2eeee"), ("pressed", "#d0e4e6")])
+        style.configure("Brand.TFrame", background="white")
+        style.configure("BrandTitle.TLabel", background="white", foreground=self.BRAND,
+                        font=("Segoe UI", 22, "bold"))
+        style.configure("BrandText.TLabel", background="white", foreground=self.MUTED,
+                        font=("Segoe UI", 10))
+        style.configure("BrandSmall.TLabel", background="white", foreground=self.MUTED,
+                        font=("Segoe UI", 9))
+        style.configure("BrandLogo.TLabel", background="white", foreground=self.BRAND,
+                        font=("Segoe UI", 19, "bold"))
+        style.configure("Treeview.Heading", background="#e4eff0", foreground=self.BRAND)
+        style.configure("TNotebook", background=self.BG, borderwidth=0)
+        style.configure("TNotebook.Tab", padding=(10, 6), background="#e1ebed", foreground=self.INK)
+        style.map("TNotebook.Tab", background=[("selected", self.BRAND)],
+                  foreground=[("selected", "white")])
 
         outer = ttk.Frame(self.root, padding=12)
         outer.pack(fill="both", expand=True)
@@ -750,15 +797,27 @@ class RoutingDemo:
         header = ttk.Frame(outer)
         header.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         header.columnconfigure(0, weight=1)
-        ttk.Label(header, text="Dijkstra Routing Lab", style="Title.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Label(header, text="01  Calculate shortest paths     02  Install next hops     03  Forward IP packets",
-                  style="Small.TLabel").grid(row=1, column=0, columnspan=7, sticky="w")
-        ttk.Button(header, text="Add router", command=self.add_router_dialog).grid(row=0, column=1, padx=5)
-        ttk.Button(header, text="Add link", command=self.add_link_dialog).grid(row=0, column=2, padx=5)
-        ttk.Button(header, text="Save graph", command=self.save_graph).grid(row=0, column=3, padx=5)
-        ttk.Button(header, text="Load graph", command=self.load_graph).grid(row=0, column=4, padx=5)
-        ttk.Button(header, text="Export tables", command=self.export_tables).grid(row=0, column=5, padx=5)
-        ttk.Button(header, text="Reset network", command=self.reset_network).grid(row=0, column=6)
+        self.brand_header = ttk.Frame(header, style="Brand.TFrame", padding=(16, 10))
+        self.brand_header.grid(row=0, column=0, sticky="ew")
+        self.brand_header.columnconfigure(1, weight=1)
+        self.ihn_header = self._brand_logo(self.brand_header, "ihn", "IHN")
+        self.ihn_header.grid(row=0, column=0, rowspan=2, padx=(0, 14))
+        ttk.Label(self.brand_header, text=APP_NAME, style="BrandTitle.TLabel").grid(
+            row=0, column=1, sticky="w")
+        ttk.Label(self.brand_header, text="Calculate shortest paths. Build tables. Follow every hop.",
+                  style="BrandSmall.TLabel").grid(row=1, column=1, sticky="w", pady=(1, 0))
+        self.ucn_header = self._brand_logo(self.brand_header, "ucn", "UCN")
+        self.ucn_header.grid(row=0, column=2, rowspan=2, padx=(24, 18))
+        self.about_button = ttk.Button(self.brand_header, text="About", command=self.show_about)
+        self.about_button.grid(row=0, column=3, rowspan=2, padx=(0, 2))
+        tk.Frame(header, background=self.BRAND, height=3).grid(row=1, column=0, sticky="ew")
+        toolbar = ttk.Frame(header, padding=(0, 7, 0, 0))
+        toolbar.grid(row=2, column=0, sticky="ew")
+        ttk.Label(toolbar, text="TOPOLOGY", style="Section.TLabel").pack(side="left", padx=(0, 10))
+        for label, command in (("Add router", self.add_router_dialog), ("Add link", self.add_link_dialog),
+                               ("Save graph", self.save_graph), ("Load graph", self.load_graph),
+                               ("Export tables", self.export_tables), ("Reset network", self.reset_network)):
+            ttk.Button(toolbar, text=label, command=command).pack(side="left", padx=(0, 6))
         menu = tk.Menu(self.root)
         files = tk.Menu(menu, tearoff=False)
         files.add_command(label="Save graph", accelerator="Ctrl+S", command=self.save_graph)
@@ -771,7 +830,13 @@ class RoutingDemo:
         files.add_separator()
         files.add_command(label="Exit", command=self.close)
         menu.add_cascade(label="File", menu=files)
+        help_menu = tk.Menu(menu, tearoff=False)
+        help_menu.add_command(label="About Dijkstra Routing Lab...", accelerator="F1", command=self.show_about)
+        menu.add_cascade(label="Help", menu=help_menu)
+        self.menu = menu
+        self.help_menu = help_menu
         self.root.configure(menu=menu)
+        self.root.bind("<F1>", lambda event: (self.show_about(), "break")[1])
         for binding, command in (("<Control-s>", self.save_graph),
                                  ("<Control-Shift-S>", lambda: self.save_graph(save_as=True)),
                                  ("<Control-o>", self.load_graph)):
@@ -820,7 +885,7 @@ class RoutingDemo:
         left.columnconfigure(0, weight=1)
         left.rowconfigure(0, weight=1)
         self.canvas = tk.Canvas(left, background="white", highlightthickness=1,
-                                highlightbackground="#d7e0eb", width=710, height=370)
+                                highlightbackground=self.BORDER, width=710, height=370)
         self.canvas.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
         self.canvas.bind("<Configure>", lambda event: self.draw_network())
         self.canvas.bind("<Double-Button-1>", self._add_router_at_click)
@@ -971,8 +1036,155 @@ class RoutingDemo:
         help_text.pack(fill="both", expand=True)
         help_text.insert("1.0", GUI_GUIDE)
         help_text.configure(state="disabled")
-        ttk.Label(outer, textvariable=self.status_text, style="Small.TLabel").grid(
-            row=4, column=0, sticky="ew", pady=(8, 0))
+        footer = ttk.Frame(outer)
+        footer.grid(row=4, column=0, sticky="ew", pady=(8, 0))
+        footer.columnconfigure(0, weight=1)
+        ttk.Label(footer, textvariable=self.status_text, style="Small.TLabel").grid(
+            row=0, column=0, sticky="w")
+        ttk.Label(footer, text=f"{__copyright__}  |  v{__version__}",
+                  style="Small.TLabel").grid(row=0, column=1, sticky="e", padx=(12, 0))
+
+    def _load_brand_assets(self) -> None:
+        """Local, optional PNG assets; never download files while the application runs."""
+        for key, filename in (("ihn", "ihn-logo.png"), ("ucn", "ucn-logo.png"),
+                              ("icon16", "ihn-icon-16.png")):
+            try:
+                self.brand_images[key] = tk.PhotoImage(master=self.root, file=str(ASSET_DIR / filename))
+            except (tk.TclError, OSError) as error:
+                self.asset_warnings.append(f"Optional branding asset unavailable: {filename} ({error}).")
+        images = [self.brand_images[key] for key in ("ihn", "icon16") if key in self.brand_images]
+        if images:
+            try:
+                self.root.iconphoto(True, *images)
+            except tk.TclError as error:
+                self.asset_warnings.append(f"Window icon not supported by this Tk/window manager: {error}.")
+        # On Windows, use the bundled multi-size ICO for main and future dialogs.
+        # PNG iconphoto above is also a fallback if this optional ICO is missing.
+        if sys.platform == "win32":
+            try:
+                self.root.iconbitmap(default=str(ASSET_DIR / "ihn.ico"))
+            except (tk.TclError, OSError) as error:
+                self.asset_warnings.append(f"Windows ICO unavailable; using PNG icon when supported ({error}).")
+
+    def _brand_logo(self, parent, key: str, fallback: str):
+        image = self.brand_images.get(key)
+        if image is None:
+            return ttk.Label(parent, text=fallback, style="BrandLogo.TLabel")
+        return ttk.Label(parent, image=image, style="BrandLogo.TLabel")
+
+    def show_about(self):
+        """Show one modal About window. Keep topology, routes and simulation work intact."""
+        if self.about_window is not None and self.about_window.winfo_exists():
+            self.about_window.lift()
+            self.about_window.focus_set()
+            return self.about_window
+        if not self._pause_for_file_dialog():
+            return None
+        dialog = tk.Toplevel(self.root)
+        dialog.withdraw()
+        self.about_window = dialog
+        dialog.title(f"About {APP_NAME}")
+        dialog.transient(self.root)
+        dialog.configure(background="white")
+        dialog.minsize(570, 440)
+        dialog.columnconfigure(0, weight=1)
+        dialog.rowconfigure(1, weight=1)
+
+        banner = ttk.Frame(dialog, style="Brand.TFrame", padding=(22, 16))
+        banner.grid(row=0, column=0, sticky="ew")
+        banner.columnconfigure(1, weight=1)
+        self._brand_logo(banner, "ihn", "IHN").grid(row=0, column=0, rowspan=2, padx=(0, 14))
+        ttk.Label(banner, text=APP_NAME, style="BrandTitle.TLabel",
+                  font=("Segoe UI", 19, "bold")).grid(row=0, column=1, sticky="w")
+        ttk.Label(banner, text=f"Version {__version__}  |  Interactive network laboratory",
+                  style="BrandSmall.TLabel").grid(row=1, column=1, sticky="w")
+        self._brand_logo(banner, "ucn", "UCN").grid(row=0, column=2, rowspan=2, padx=(22, 0))
+        panel = ttk.Frame(dialog, style="Brand.TFrame", padding=(22, 0, 22, 10))
+        panel.grid(row=1, column=0, sticky="nsew")
+        text = ScrolledText(panel, wrap="word", font=("Segoe UI", 11), height=14,
+                            background="white", foreground=self.INK, relief="flat",
+                            borderwidth=0, highlightthickness=0, padx=0, pady=6,
+                            spacing1=0, spacing3=4, selectbackground="#cee6ea")
+        text.pack(fill="both", expand=True)
+        text.tag_configure("heading", foreground=self.BRAND, font=("Segoe UI", 10, "bold"), spacing1=12)
+        for heading, body in ABOUT_SECTIONS:
+            text.insert("end", heading + "\n", "heading")
+            text.insert("end", body + "\n")
+        text.configure(state="disabled")
+        self.about_text = text
+
+        details = ttk.Frame(dialog, style="Brand.TFrame", padding=(22, 8, 22, 0))
+        details.grid(row=2, column=0, sticky="ew")
+        details.columnconfigure(0, weight=1)
+        ttk.Label(details, text=__copyright__, style="BrandText.TLabel",
+                  font=("Segoe UI", 11, "bold")).grid(row=0, column=0, sticky="w")
+        ttk.Label(details, text="Code and documentation: Apache License 2.0. See LICENSE and NOTICE.",
+                  style="BrandSmall.TLabel").grid(row=1, column=0, sticky="w", pady=(3, 3))
+        ttk.Label(details, text="UCN's logo remains UCN's mark; its display does not imply endorsement.",
+                  style="BrandSmall.TLabel", wraplength=620).grid(row=2, column=0, sticky="w")
+        self.about_repo_value = tk.StringVar(master=dialog, value=REPOSITORY_URL)
+        entry = ttk.Entry(details, textvariable=self.about_repo_value, state="readonly",
+                          font=("Segoe UI", 10))
+        entry.grid(row=3, column=0, sticky="ew", pady=(12, 0))
+        self.about_repo_entry = entry
+        buttons = ttk.Frame(dialog, style="Brand.TFrame", padding=(22, 10, 22, 14))
+        buttons.grid(row=3, column=0, sticky="ew")
+        self.about_open_button = ttk.Button(buttons, text="Open GitHub", command=self.open_repository,
+                                            style="Accent.TButton")
+        self.about_open_button.pack(side="left")
+        self.about_copy_button = ttk.Button(buttons, text="Copy link", command=self.copy_repository)
+        self.about_copy_button.pack(side="left", padx=8)
+        self.about_feedback = tk.StringVar(master=dialog)
+        ttk.Label(buttons, textvariable=self.about_feedback, style="BrandSmall.TLabel").pack(side="left")
+        self.about_close_button = ttk.Button(buttons, text="Close", command=self.close_about)
+        self.about_close_button.pack(side="right")
+        dialog.protocol("WM_DELETE_WINDOW", self.close_about)
+        dialog.bind("<Escape>", lambda event: self.close_about())
+        dialog.bind("<F1>", lambda event: "break")
+        dialog.update_idletasks()
+        width = min(760, max(570, self.root.winfo_screenwidth() - 60))
+        height = min(700, max(440, self.root.winfo_screenheight() - 110))
+        x = max(0, min(self.root.winfo_rootx() + (self.root.winfo_width() - width) // 2,
+                       self.root.winfo_screenwidth() - width))
+        y = max(0, min(self.root.winfo_rooty() + (self.root.winfo_height() - height) // 2,
+                       self.root.winfo_screenheight() - height - 40))
+        dialog.geometry(f"{width}x{height}+{x}+{y}")
+        dialog.deiconify()
+        dialog.grab_set()
+        self.about_close_button.focus_set()
+        return dialog
+
+    def close_about(self) -> None:
+        dialog = self.about_window
+        self.about_window = None
+        if dialog is not None and dialog.winfo_exists():
+            if dialog.grab_current() == dialog:
+                dialog.grab_release()
+            dialog.destroy()
+        self.root.focus_set()
+
+    def open_repository(self) -> bool:
+        """Open only the fixed project URL, and only following an explicit click."""
+        try:
+            opened = webbrowser.open(REPOSITORY_URL, new=2)
+        except (webbrowser.Error, OSError):
+            opened = False
+        if not opened:
+            messagebox.showwarning("Cannot open browser", "Open this address in your browser:\n" + REPOSITORY_URL,
+                                   parent=self.about_window or self.root)
+        return bool(opened)
+
+    def copy_repository(self) -> bool:
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(REPOSITORY_URL)
+        except tk.TclError:
+            messagebox.showwarning("Cannot copy link", "Select and copy the address shown in the About window.",
+                                   parent=self.about_window or self.root)
+            return False
+        if self.about_window is not None and self.about_window.winfo_exists():
+            self.about_feedback.set("Link copied")
+        return True
 
     def _combo(self, parent, variable, values, width):
         selector = ttk.Combobox(parent, textvariable=variable, values=values, state="readonly", width=width)
@@ -992,9 +1204,9 @@ class RoutingDemo:
     def _responsive_layout(self, event) -> None:
         if not hasattr(self, "trace_tree"):
             return
-        compact = self.root.winfo_height() < 835
+        compact = self.root.winfo_height() < 900
         self.compact = compact
-        self.trace_tree.configure(height=3 if compact else 4 if self.root.winfo_height() < 960 else 6)
+        self.trace_tree.configure(height=2 if self.root.winfo_height() < 820 else 3 if compact else 4)
         # Keep the editable packet controls usable on 1280/1366-pixel laptops.
         # Users may still drag the sash; the ratio resets only on window resize.
         if getattr(self, "_last_body_width", None) != event.width:
@@ -1186,6 +1398,9 @@ class RoutingDemo:
 
     def _show_editor(self, title: str, fields: list, submit, hint: str):
         """A small modal form. Errors stay in the form; Cancel never changes data."""
+        if self.about_window is not None and self.about_window.winfo_exists():
+            self.about_window.lift()
+            return None
         if self.editor_window is not None and self.editor_window.winfo_exists():
             self.editor_window.lift()
             return self.editor_window
@@ -1571,9 +1786,8 @@ class RoutingDemo:
     def _refresh_status(self) -> None:
         current = sum(self.engine.table_status(name) == "current" for name in self.network.routers)
         activity = "SPF playing" if self.spf_auto else "packet playing" if self.packet_auto else "ready / paused"
-        self.status_text.set(f"Topology revision {self.network.revision}  |  Current SPF tables {current}/{len(self.network.routers)}  |  "
-                             f"Completed SPF runs {self.engine.spf_runs}  |  {activity}  |  "
-                             "Simulation only: no real packets, no OSPF flooding; one next hop per prefix")
+        self.status_text.set(f"Topology {self.network.revision}  |  SPF tables {current}/{len(self.network.routers)}  |  "
+                             f"SPF runs {self.engine.spf_runs}  |  {activity}")
 
     def _positions(self) -> dict[str, tuple[float, float]]:
         width, height = max(self.canvas.winfo_width(), 300), max(self.canvas.winfo_height(), 170)
@@ -1704,6 +1918,9 @@ class RoutingDemo:
         return graph_to_data(self.network) != self.saved_graph
 
     def _pause_for_file_dialog(self) -> bool:
+        if self.about_window is not None and self.about_window.winfo_exists():
+            self.about_window.lift()
+            return False
         if self.editor_window is not None and self.editor_window.winfo_exists():
             self.editor_window.lift()
             return False
@@ -1870,7 +2087,7 @@ OTHER EXPERIMENTS
 - Use TTL 3: the packet expires before it reaches F.
 - Enter 10.99.0.1 as Dest. IP: no matching route exists.
 - Compare Previous with Next hop. They are different concepts.
-- Watch Completed SPF runs stay unchanged during packet forwarding.
+- Watch SPF runs stay unchanged during packet forwarding.
 
 MODEL BOUNDARIES
 
@@ -1883,6 +2100,12 @@ Tables stay installed after link edits so you can observe stale routes. Recalcul
 Windows: py -3 dijkstra_routing_demo.py
 Other systems: python3 dijkstra_routing_demo.py
 
+ABOUT AND BRANDING
+
+Click About in the header, use Help > About, or press F1. The About window explains the learning purpose and model boundaries, displays the application version, copyright and license, and lets you open or copy the project's GitHub address. Playback is paused while About is open; your graph, installed routes and unfinished SPF work are retained. Resume playback explicitly after closing it.
+
+The IHN icon and UCN logo are loaded from the local assets folder. The application still runs with text labels if optional logo files are missing. The IHN ICO can also be used for a Windows shortcut. This desktop application has a window icon, not a browser tab. No network request is made to load the logos.
+
 COPYRIGHT AND LICENSE
 
 Copyright 2026 Ib Helmer Nielsen.
@@ -1893,6 +2116,7 @@ See LICENSE and NOTICE in the repository.
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--version", action="version", version=f"{APP_NAME} {__version__}")
     parser.add_argument("--print-tables", action="store_true", help="Print tables and a sample packet trace without a GUI.")
     args = parser.parse_args()
     if args.print_tables:

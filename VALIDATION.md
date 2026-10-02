@@ -2,6 +2,61 @@
 
 Copyright 2026 Ib Helmer Nielsen. Licensed under Apache-2.0.
 
+## Version 1.3.0 - About dialog, IHN icon and UCN branding
+
+Validated on 2 October 2026 with CPython 3.13.5, Tkinter/Tk 8.6 on Linux and an
+Xvfb display at 1680 x 1050. The v1.2.0 archive's application was checked against
+GitHub commit `dcc588b9b93793f12a749eb0a9bd114787827552` before editing:
+application blob `d5c3faa6468da5b4085ea563838a7a25cfdc6432`.
+
+```text
+DISPLAY=:99 RUN_GUI_TESTS=1 python -m unittest -v
+Ran 106 tests
+OK
+```
+
+Without GUI opt-in, **68 tests pass and 38 GUI tests are skipped**. The existing
+86 tests and routing/storage behavior are preserved. All Python files parse
+with Python 3.10's grammar. `--version` works without a display, and the
+`--print-tables` example still delivers A-C-B-D-E-F at cost 10.
+
+### New checks
+
+Five non-GUI tests check metadata and educational purpose, PNG dimensions,
+exact original IHN/UCN source hashes, the four ICO sizes and the version command.
+Fifteen real-Tk tests cover both header logos, About's content, the About button,
+Help menu, F1/Escape, singleton/modal handling, browser launch and failure,
+clipboard success/failure, topology/route/packet/SPF preservation, file/editor
+shortcuts while a modal is open, a compact layout, missing/corrupt logo files,
+and launch from another working directory.
+
+Browser launch is mocked: tests do not open a real external browser. Clipboard
+copy uses the Xvfb clipboard; the clipboard failure path is injected. Existing
+file choosers and confirmations remain mocked in the persistence tests.
+The IHN/UCN assets are loaded by real Tk PhotoImage objects.
+
+### Visual review
+
+Actual running windows were captured and inspected at **1440 x 960** and
+**1180 x 740**. Both logos, the About button, topology controls and packet
+controls remain visible. At the smaller size the Live view and tables scroll,
+router IP captions are omitted, and the packet trace is shorter. The About
+window is scrollable; its repository/copyright/actions stay outside the scroll
+region. A 600 x 480 About layout is checked by the GUI tests.
+
+### Limits
+
+Native Windows/macOS execution, Windows taskbar grouping, Explorer shortcuts,
+and a real browser launch were **not tested**. Tk accepted the icon request on
+Linux, but Xvfb has no normal desktop window manager: no claim is made about a
+rendered native title-bar/taskbar icon there. Python versions earlier than
+3.13.5 were not executed. Screenshots are real application captures, not mockups.
+
+The UCN source SVG and IHN source PNG are byte-identical to the user's existing
+project assets. PNG/ICO derivatives were prepared ahead of time; no Pillow or
+CairoSVG dependency was added to the application or tests. Trademark provenance
+is recorded separately from the software license in `assets/README.md`.
+
 ## Version 1.2.0 - saved and loadable graphs
 
 Validated on 2 October 2026 using CPython 3.13.5 on Linux with Tkinter/Tcl-Tk and an Xvfb display. The v1.1.0 source archive was checked against the current GitHub tree at commit `b9d8a57d7593e026eb9eb731125b9d6e7e8e355a` before editing; its application blob was `fb03bbb5ef3627962f93de6a46872d875dabcf40`.
