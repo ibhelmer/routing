@@ -4,6 +4,8 @@
 
 Repository: [ibhelmer/routing](https://github.com/ibhelmer/routing)
 
+**Version 1.1.0:** add routers and links interactively; drag nodes to arrange the graph.
+
 An interactive Python teaching example that makes two different activities visible:
 
 **Control plane:** calculate least-cost paths, derive next hops, and install each router's routing table.
@@ -45,7 +47,7 @@ sudo apt install python3-tk
 python3 -m tkinter
 ```
 
-The application needs a desktop display; it is not a browser application or a MicroPython program. A 1440 x 900 application window is comfortable for teaching. On smaller screens the packet trace becomes shorter and the Live view can be scrolled. The divider between the network and the tables is draggable.
+The application needs a desktop display; it is not a browser application or a MicroPython program. A 1440 x 960 application window is comfortable for teaching. On smaller screens the packet trace becomes shorter and the Live view can be scrolled. The divider between the network and the tables is draggable.
 
 ### Headless example
 
@@ -119,6 +121,56 @@ The alternative A -> C -> E -> F uses only three hops but costs 2 + 7 + 2 = 11. 
 
 Watch **Completed SPF runs** in the status bar: its value does not increase as the packet travels. A packet with TTL 6 can traverse the five links and arrive at F with TTL 1. Local loopback delivery does not consume another hop.
 
+## Add routers and links
+
+Click **Add router** at the top of the window, or **double-click empty space on the graph** to place a new router there.
+
+The dialog suggests the next unused name and IPv4 address, initially **G** and **10.0.0.7**. Enter a unique name (1-12 letters, digits or underscores, starting with a letter) and a unique IPv4 loopback address **without `/32`**. Names are case-sensitive. Multicast, unspecified and limited-broadcast addresses are rejected.
+
+**Connect to (optional)** can add the first connection at the same time. Select an existing router and enter a positive integer **First link cost**. Keep **(none)** to create an isolated router; its unused cost field is ignored. Cancel and invalid input leave the topology unchanged. The application rejects duplicate names/IPs before creating anything.
+
+To add another connection, click **Add link**, select two different routers, and enter its cost. Links are bidirectional. Duplicate links, self-links and non-positive costs are rejected. Change an existing link using the original **LINK EDITOR** instead.
+
+New routers immediately appear in **Root**, **Inspect router**, **Source** and **Target**. **Target** switches to the newly added router and fills in its destination IP. Each new router initially has only its local route; existing installed tables are retained and marked **STALE**. Run **Build all now** or **Animate all** to install updated tables before sending packets to the new destination.
+
+### Example: add G behind F
+
+1. Click **Add router** and keep **G**, **10.0.0.7**.
+2. Set **Connect to (optional) = F**, **First link cost = 3**, then click **Add router**.
+3. Click **Build all now**. The status bar now shows **7/7** current tables.
+4. Set **Source = A**, **Target = G**, then **New packet** and **Play packet**.
+
+```text
+A --2--> C --3--> B --2--> D --1--> E --2--> F --3--> G
+Total cost: 13; router-to-router hops: 6
+```
+
+Adding G without a connection is also valid: it stays unreachable from other routers until a link is added and tables are recalculated.
+
+### Arrange the graph and inspect larger tables
+
+**Drag a router** with the left mouse button to move it. A drawing move does not change link costs, invalidate tables, or run Dijkstra. Link arrows follow the new positions, including during packet animation. A double-click on an existing router or link does not create another node.
+
+The working and routing tables have scrollbars; the forwarding lookup scrolls the selected route into view. Router counts, selector contents and the all-router SPF queue are dynamic rather than fixed at six. Suggested names continue with R1, R2, and so on after Z. A crowded graph may need manual rearrangement or a larger window; automatic graph layout and zoom are not implemented.
+
+**Session storage:** additions and positions are kept in memory. **Export tables** saves a JSON record of all routers, links, installed routes, versions and positions, but there is currently no topology-import command. **Reset network** asks for confirmation when custom routers exist, then restores the original A-F example. Closing the program also discards the edited topology.
+
+### Use the editor model from Python
+
+```python
+from dijkstra_routing_demo import Router, RoutingEngine, make_default_network, trace_packet
+
+engine = RoutingEngine(make_default_network())
+engine.add_router(Router("G", "10.0.0.7", 0.5, 0.9), connect_to="F", cost=3)
+# Optional additional connection: engine.network.add_link("A", "G", 20)
+engine.calculate_all()
+packet, _ = trace_packet(engine, "A", "10.0.0.7")
+assert packet.path == ["A", "C", "B", "D", "E", "F", "G"]
+assert packet.total_cost == 13
+```
+
+Use **`engine.add_router(...)`** when a routing engine already exists: this registers the new local route as well as the node. `Network.add_router(...)` is the lower-level topology operation for use before constructing an engine. A topology edit stops current GUI animations and abandons incomplete SPF work; simply opening and cancelling a dialog pauses playback without changing the graph or installed routes.
+
 ## Link editor and failure experiments
 
 Click a link cost to select that link in the editor. Change its cost or **Link up** state and press **Apply change**. Right-clicking a link toggles it immediately; Control-click also works. Edits stop the current animation but retain installed routing tables. Those tables are marked **STALE** until recalculated.
@@ -186,7 +238,7 @@ print("Total cost:", packet.total_cost)
 
 This is **not an OSPF implementation**. The demonstration starts with a shared, complete topology snapshot and omits neighbor discovery, LSA flooding, areas, authentication, timers, and realistic distributed convergence timing. Serial animation of six calculations is a presentation choice, not how routers coordinate their SPF execution.
 
-Destinations are the six routers' **IPv4 loopbacks advertised as /32 prefixes**, rather than attached client LANs. Next hops are neighbor router names; `to-C` is a simulated interface name, not a real NIC or IP next-hop address. The model uses one installed table as a simplified RIB/FIB and does not simulate hardware FIB programming.
+Destinations are the routers' **IPv4 loopbacks advertised as /32 prefixes**, rather than attached client LANs. Next hops are neighbor router names; `to-C` is a simulated interface name, not a real NIC or IP next-hop address. The model uses one installed table as a simplified RIB/FIB and does not simulate hardware FIB programming.
 
 Link costs are symmetric positive integers. Dijkstra can handle zero-weight edges, but this network editor deliberately requires positive costs. Equal-cost alternatives keep the first discovered route using deterministic processing order. **ECMP is not implemented.**
 
@@ -194,11 +246,34 @@ TTL decreases on forwarding and not on local delivery. Drops are logged, but no 
 
 ## Verification
 
-`test_dijkstra_routing_demo.py` contains **27 passing unit tests**. One test compares all six sources across 40 random graphs with an independent Bellman-Ford reference and checks forwarding for all **1,440 source/destination pairs**.
+The test suite now contains **52 tests: 42 model tests and 10 opt-in GUI tests**. All 52 passed during the Linux/Xvfb validation of version 1.1.0.
 
-Other tests cover staged versus installed tables, predecessor versus next hop, deterministic equal-cost choices, disconnected routers, stale-table drops, recovery, TTL expiry, looping installed entries, unknown destinations, input validation, longest-prefix matching, and the fact that packet forwarding never invokes Dijkstra.
+`test_dijkstra_routing_demo.py` preserves the original 27 tests, including 40 random graphs checked against an independent Bellman-Ford reference and 1,440 source/destination packet traces. `test_topology_editor.py` adds 15 model tests and 10 GUI checks. Its larger-graph reference test checks another 1,125 source/destination pairs across five 15-router graphs built with the editing API.
 
-See `VALIDATION.md` for the actual test environment and GUI checks. Windows and macOS were not available for native execution during verification.
+Normal, display-independent test run (42 pass; 10 GUI checks are deliberately skipped):
+
+```bash
+python -m unittest -v
+```
+
+To include the real Tk window checks, run on a graphical desktop:
+
+```powershell
+# Windows PowerShell
+$env:RUN_GUI_TESTS = "1"
+python -m unittest -v
+```
+
+```bash
+# Linux / macOS with a graphical display
+RUN_GUI_TESTS=1 python -m unittest -v
+# A headless Linux machine with Xvfb installed
+RUN_GUI_TESTS=1 xvfb-run -a python -m unittest -v
+```
+
+The new GUI checks cover both editor forms, cancelled/invalid edits, dynamic dropdowns, isolated nodes, node dragging, interruption of animations, reset confirmation, larger-table scrolling, overlapping node positions, and an animated A-to-G delivery without further SPF runs.
+
+See `VALIDATION.md` for the actual environment and limitations. Native Windows and macOS execution were not available for this update.
 
 ## Primary references
 
@@ -216,7 +291,8 @@ The implementation is an original teaching example based on the principles below
 | File | Purpose |
 |---|---|
 | `dijkstra_routing_demo.py` | Complete GUI and independently usable routing model |
-| `test_dijkstra_routing_demo.py` | 27 model tests, including randomized reference comparisons |
+| `test_dijkstra_routing_demo.py` | Original 27 model tests, including randomized reference comparisons |
+| `test_topology_editor.py` | 15 additional model tests and 10 opt-in graphical tests |
 | `run_demo.bat` | Windows launcher |
 | `README.md` | Installation, classroom walkthrough, experiments, and design notes |
 | `VALIDATION.md` | Validation environment, performed checks, and limitations |

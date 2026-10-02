@@ -27,12 +27,13 @@ from __future__ import annotations
 
 import argparse
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import heapq
 import ipaddress
 import json
 import math
 from pathlib import Path
+import re
 import sys
 import time
 from typing import Iterator
@@ -40,6 +41,7 @@ from typing import Iterator
 __author__ = "Ib Helmer Nielsen"
 __copyright__ = "Copyright 2026 Ib Helmer Nielsen"
 __license__ = "Apache-2.0"
+__version__ = "1.1.0"
 
 
 # ---------------------------------------------------------------------------
@@ -81,7 +83,7 @@ class Network:
         if len(set(addresses)) != len(addresses):
             raise ValueError("Router loopback addresses must be unique.")
         for router in routers:
-            ipaddress.IPv4Address(router.address)
+            self._validate_router(router)
         self.links: dict[tuple[str, str], Link] = {}
         for link in links:
             self._validate_cost(link.cost)
@@ -91,6 +93,80 @@ class Network:
                 raise ValueError("Parallel links are not supported by this example.")
             self.links[link.key] = Link(link.a, link.b, link.cost, link.enabled)
         self.revision = 1
+
+    @staticmethod
+    def _validate_router(router: Router) -> None:
+        if not isinstance(router.name, str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,11}", router.name):
+            raise ValueError("Name: use 1-12 letters, digits or underscores, starting with a letter.")
+        try:
+            address = ipaddress.IPv4Address(router.address)
+        except (ValueError, TypeError) as error:
+            raise ValueError("Enter a valid IPv4 loopback address, without /32.") from error
+        if address.is_multicast or address.is_unspecified or int(address) == 0xFFFFFFFF:
+            raise ValueError("Use a unicast IPv4 address, not multicast, unspecified or limited broadcast.")
+        Network._validate_position(router.x, router.y)
+
+    @staticmethod
+    def _validate_position(x: float, y: float) -> None:
+        if any(isinstance(v, bool) or not isinstance(v, (int, float))
+               or not math.isfinite(v) or not 0 <= v <= 1 for v in (x, y)):
+            raise ValueError("Router positions must be finite numbers between 0 and 1.")
+
+    def add_router(self, router: Router, connect_to: str | None = None, cost: int = 1) -> None:
+        """Add a router and optionally its first link as one validated edit."""
+        self._validate_router(router)
+        if router.name in self.routers:
+            raise ValueError(f"Router {router.name} already exists; choose a unique name.")
+        if any(ipaddress.IPv4Address(r.address) == ipaddress.IPv4Address(router.address)
+               for r in self.routers.values()):
+            raise ValueError(f"IP address {router.address} is already in use.")
+        if connect_to is not None:
+            if connect_to not in self.routers:
+                raise ValueError("Choose an existing router for the first connection.")
+            self._validate_cost(cost)
+        # Validate everything before mutating either collection.
+        self.routers[router.name] = router
+        if connect_to is not None:
+            link = Link(router.name, connect_to, cost)
+            self.links[link.key] = link
+        self.revision += 1
+
+    def add_link(self, a: str, b: str, cost: int, enabled: bool = True) -> None:
+        self._validate_cost(cost)
+        if a == b or a not in self.routers or b not in self.routers:
+            raise ValueError("Choose two different, existing routers.")
+        link = Link(a, b, cost, bool(enabled))
+        if link.key in self.links:
+            raise ValueError("This link already exists. Use the link editor to change its cost or state.")
+        self.links[link.key] = link
+        self.revision += 1
+
+    def move_router(self, name: str, x: float, y: float) -> None:
+        """Move a drawing only: link costs, table versions and SPF stay unchanged."""
+        self._validate_position(x, y)
+        if name not in self.routers:
+            raise ValueError(f"Unknown router: {name}")
+        self.routers[name] = replace(self.routers[name], x=x, y=y)
+
+    def suggest_router(self) -> Router:
+        """Suggest unused identifiers and an open position; do not change the graph."""
+        name = next((chr(code) for code in range(ord("A"), ord("Z") + 1)
+                     if chr(code) not in self.routers), "")
+        index = 1
+        while not name:
+            candidate = f"R{index}"
+            if candidate not in self.routers:
+                name = candidate
+            index += 1
+        used = {ipaddress.IPv4Address(r.address) for r in self.routers.values()}
+        address = ipaddress.IPv4Address("10.0.0.1")
+        while address in used:
+            address += 1
+        # Choose the grid point furthest from existing routers.
+        points = [(x / 10, y / 10) for x in range(1, 10) for y in range(1, 10)]
+        x, y = max(points, key=lambda point: min(
+            (point[0] - r.x) ** 2 + (point[1] - r.y) ** 2 for r in self.routers.values()))
+        return Router(name, str(address), x, y)
 
     @staticmethod
     def _validate_cost(cost: int) -> None:
@@ -267,6 +343,12 @@ class RoutingEngine:
         self.results: dict[str, DijkstraStep] = {}
         self.spf_runs = 0
 
+    def add_router(self, router: Router, connect_to: str | None = None, cost: int = 1) -> None:
+        """Register the new router's local route without recalculating old tables."""
+        self.network.add_router(router, connect_to, cost)
+        self.tables[router.name] = {router.name: Route(router.name, router.prefix, None, 0)}
+        self.versions[router.name] = None
+
     def install(self, step: DijkstraStep, revision: int) -> None:
         if step.phase != "finish":
             raise ValueError("Do not install an unfinished SPF calculation.")
@@ -309,6 +391,8 @@ class RoutingEngine:
             "model": "Dijkstra teaching simulation; loopback destinations; no ECMP",
             "topology_revision": self.network.revision,
             "routers": {name: router.address for name, router in self.network.routers.items()},
+            "positions": {name: {"x": router.x, "y": router.y}
+                          for name, router in self.network.routers.items()},
             "links": [{"a": link.a, "b": link.b, "cost": link.cost, "enabled": link.enabled}
                       for link in self.network.links.values()],
             "tables": {
@@ -436,7 +520,7 @@ class RoutingDemo:
         self.root = root
         self.root.title("Dijkstra Routing Lab | Control plane -> Data plane")
         self.root.geometry(f"{min(1440, self.root.winfo_screenwidth() - 40)}x"
-                           f"{min(900, max(740, self.root.winfo_screenheight() - 80))}")
+                           f"{min(960, max(740, self.root.winfo_screenheight() - 80))}")
         self.root.minsize(1180, 740)
         self.root.configure(background=self.BG)
         self.network = make_default_network()
@@ -460,6 +544,10 @@ class RoutingDemo:
         self.trace_count = 0
         self.step_count = 0
         self.event_count = 0
+        self.router_selectors: list = []
+        self.drag_router: str | None = None
+        self.drag_offset = (0.0, 0.0)
+        self.editor_window = None
 
         self.spf_root = tk.StringVar(value="A")
         self.inspector = tk.StringVar(value="A")
@@ -513,13 +601,15 @@ class RoutingDemo:
         ttk.Label(header, text="Dijkstra Routing Lab", style="Title.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Label(header, text="01  Calculate shortest paths     02  Install next hops     03  Forward IP packets",
                   style="Small.TLabel").grid(row=1, column=0, sticky="w")
-        ttk.Button(header, text="Export tables", command=self.export_tables).grid(row=0, column=1, padx=5)
-        ttk.Button(header, text="Reset network", command=self.reset_network).grid(row=0, column=2)
+        ttk.Button(header, text="Add router", command=self.add_router_dialog).grid(row=0, column=1, padx=5)
+        ttk.Button(header, text="Add link", command=self.add_link_dialog).grid(row=0, column=2, padx=5)
+        ttk.Button(header, text="Export tables", command=self.export_tables).grid(row=0, column=3, padx=5)
+        ttk.Button(header, text="Reset network", command=self.reset_network).grid(row=0, column=4)
 
         controls = ttk.LabelFrame(outer, text="CONTROL PLANE  |  Dijkstra / shortest-path first", padding=(9, 6))
         controls.grid(row=1, column=0, sticky="ew", pady=(0, 6))
         ttk.Label(controls, text="Root").pack(side="left")
-        self._combo(controls, self.spf_root, list(self.network.routers), 4).pack(side="left", padx=(4, 8))
+        self._combo(controls, self.spf_root, list(self.network.routers), 8).pack(side="left", padx=(4, 8))
         for label, callback in [("New SPF", self.new_spf), ("Step SPF", self.step_spf)]:
             ttk.Button(controls, text=label, command=callback).pack(side="left", padx=2)
         self.spf_play_button = ttk.Button(controls, text="Play SPF", command=self.toggle_spf)
@@ -536,7 +626,8 @@ class RoutingDemo:
         links.grid(row=2, column=0, sticky="ew", pady=(0, 8))
         ttk.Label(links, text="LINK EDITOR", style="Section.TLabel").pack(side="left", padx=(0, 8))
         selector = self._combo(links, self.link_name,
-                               ["-".join(key) for key in sorted(self.network.links)], 6)
+                               ["-".join(key) for key in sorted(self.network.links)], 15)
+        self.link_selector = selector
         selector.pack(side="left")
         selector.bind("<<ComboboxSelected>>", lambda event: self.select_link())
         ttk.Label(links, text="Cost").pack(side="left", padx=(10, 4))
@@ -560,9 +651,12 @@ class RoutingDemo:
                                 highlightbackground="#d7e0eb", width=710, height=370)
         self.canvas.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
         self.canvas.bind("<Configure>", lambda event: self.draw_network())
+        self.canvas.bind("<Double-Button-1>", self._add_router_at_click)
+        self.canvas.bind("<B1-Motion>", self._drag_router)
+        self.canvas.bind("<ButtonRelease-1>", self._end_drag)
         ttk.Label(left, text="Final / SPF tree: green   |   Comparing: amber   |   Packet: purple   |   Down: dashed",
                   style="Small.TLabel").grid(row=1, column=0, sticky="w", pady=(4, 0))
-        ttk.Label(left, text="Click a router to inspect it. Click a cost to select a link; right-click a link to toggle it.",
+        ttk.Label(left, text="Double-click empty space to add a router; drag to move. Click a cost to edit; right-click a link to toggle.",
                   style="Small.TLabel").grid(row=2, column=0, sticky="w", pady=(0, 5))
 
         packet_box = ttk.LabelFrame(left, text="DATA PLANE  |  hop-by-hop forwarding", padding=8)
@@ -570,9 +664,9 @@ class RoutingDemo:
         row = ttk.Frame(packet_box)
         row.pack(fill="x")
         ttk.Label(row, text="Source").pack(side="left")
-        self._combo(row, self.packet_source, list(self.network.routers), 3).pack(side="left", padx=(4, 10))
+        self._combo(row, self.packet_source, list(self.network.routers), 7).pack(side="left", padx=(4, 10))
         ttk.Label(row, text="Target").pack(side="left")
-        target = self._combo(row, self.packet_target, list(self.network.routers), 3)
+        target = self._combo(row, self.packet_target, list(self.network.routers), 7)
         target.pack(side="left", padx=(4, 10))
         target.bind("<<ComboboxSelected>>", self.select_target)
         ttk.Label(row, text="Dest. IP").pack(side="left")
@@ -620,7 +714,7 @@ class RoutingDemo:
         row = ttk.Frame(live)
         row.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         ttk.Label(row, text="Inspect router").pack(side="left")
-        inspect = self._combo(row, self.inspector, list(self.network.routers), 4)
+        inspect = self._combo(row, self.inspector, list(self.network.routers), 8)
         inspect.pack(side="left", padx=6)
         inspect.bind("<<ComboboxSelected>>", lambda event: self.inspect_router(self.inspector.get()))
         ttk.Label(row, text="Double outline on the map", style="Small.TLabel").pack(side="left", padx=4)
@@ -629,6 +723,9 @@ class RoutingDemo:
             [("router", "Node", 46), ("cost", "Cost", 55), ("parent", "Previous", 70),
              ("next", "Next hop", 75), ("state", "State", 105)], height=6)
         self.work_tree.grid(row=2, column=0, sticky="ew", pady=5)
+        work_bar = ttk.Scrollbar(live, orient="vertical", command=self.work_tree.yview)
+        work_bar.grid(row=2, column=1, sticky="ns", pady=5)
+        self.work_tree.configure(yscrollcommand=work_bar.set)
         for tag, color in [("final", "#d1fae5"), ("tentative", "#fff3d1"), ("active", "#fed7aa")]:
             self.work_tree.tag_configure(tag, background=color)
         self.spf_label = ttk.Label(live, textvariable=self.spf_note, wraplength=510,
@@ -639,6 +736,9 @@ class RoutingDemo:
             [("prefix", "Destination", 135), ("next", "Next hop", 75), ("cost", "Cost", 45),
              ("interface", "Interface", 75), ("state", "State", 100)], height=6)
         self.route_tree.grid(row=5, column=0, sticky="ew", pady=5)
+        route_bar = ttk.Scrollbar(live, orient="vertical", command=self.route_tree.yview)
+        route_bar.grid(row=5, column=1, sticky="ns", pady=5)
+        self.route_tree.configure(yscrollcommand=route_bar.set)
         self.route_tree.tag_configure("staged", background="#fff3d1")
         self.route_tree.tag_configure("stale", foreground=self.RED)
         self.table_label = ttk.Label(live, textvariable=self.table_note, wraplength=510,
@@ -702,9 +802,11 @@ class RoutingDemo:
         ttk.Label(outer, textvariable=self.status_text, style="Small.TLabel").grid(
             row=4, column=0, sticky="ew", pady=(8, 0))
 
-    @staticmethod
-    def _combo(parent, variable, values, width):
-        return ttk.Combobox(parent, textvariable=variable, values=values, state="readonly", width=width)
+    def _combo(self, parent, variable, values, width):
+        selector = ttk.Combobox(parent, textvariable=variable, values=values, state="readonly", width=width)
+        if any(variable is v for v in (self.spf_root, self.inspector, self.packet_source, self.packet_target)):
+            self.router_selectors.append(selector)
+        return selector
 
     @staticmethod
     def _tree(parent, columns, height=6):
@@ -720,7 +822,7 @@ class RoutingDemo:
             return
         compact = self.root.winfo_height() < 835
         self.compact = compact
-        self.trace_tree.configure(height=3 if compact else 6)
+        self.trace_tree.configure(height=3 if compact else 4 if self.root.winfo_height() < 960 else 6)
         # Keep the editable packet controls usable on 1280/1366-pixel laptops.
         # Users may still drag the sash; the ratio resets only on window resize.
         if getattr(self, "_last_body_width", None) != event.width:
@@ -876,9 +978,182 @@ class RoutingDemo:
         source = self.spf_root.get()
         self.step = self.engine.results[source]
         self.inspector.set(source)
-        self.spf_note.set("All six routers ran their own SPF. All routing tables are now installed.")
-        self._log("CONTROL PLANE: built and installed all six routing tables.")
+        count = len(self.network.routers)
+        self.spf_note.set(f"All {count} routers ran their own SPF. All routing tables are now installed.")
+        self._log(f"CONTROL PLANE: built and installed all {count} routing tables.")
         self._refresh_all()
+
+    def _refresh_selectors(self) -> None:
+        names = sorted(self.network.routers)
+        for selector in self.router_selectors:
+            selector.configure(values=names)
+        for variable in (self.spf_root, self.inspector, self.packet_source, self.packet_target):
+            if variable.get() not in self.network.routers:
+                variable.set(names[0])
+        links = ["-".join(key) for key in sorted(self.network.links)]
+        self.link_selector.configure(values=links)
+        if self.link_name.get() not in links:
+            self.link_name.set(links[0] if links else "")
+        if links:
+            self.select_link()
+
+    def _topology_changed(self, message: str) -> None:
+        self._stop_everything()
+        self._clear_packet_display()
+        self.step = None
+        self.drag_router = None
+        self._refresh_selectors()
+        self.spf_note.set("Topology changed. Existing tables are STALE; new routers know only their own loopback. "
+                          "Use Build all now or Animate all before forwarding to a new destination.")
+        self._log(f"TOPOLOGY revision {self.network.revision}: {message} No automatic SPF.")
+        self._refresh_all()
+
+    def _show_editor(self, title: str, fields: list, submit, hint: str):
+        """A small modal form. Errors stay in the form; Cancel never changes data."""
+        if self.editor_window is not None and self.editor_window.winfo_exists():
+            self.editor_window.lift()
+            return self.editor_window
+        self._pause_spf()
+        self._cancel_packet()
+        self.draw_network()
+        self._refresh_status()
+        dialog = tk.Toplevel(self.root)
+        self.editor_window = dialog
+        dialog.title(title)
+        dialog.transient(self.root)
+        dialog.resizable(False, False)
+        panel = ttk.Frame(dialog, padding=16)
+        panel.pack(fill="both", expand=True)
+        values = {}
+        entries = []
+        for row, (key, label, value, choices) in enumerate(fields):
+            ttk.Label(panel, text=label).grid(row=row, column=0, sticky="w", padx=(0, 12), pady=5)
+            variable = tk.StringVar(master=dialog, value=value)
+            values[key] = variable
+            if choices is None:
+                entry = ttk.Entry(panel, textvariable=variable, width=25)
+            else:
+                entry = ttk.Combobox(panel, textvariable=variable, values=choices, state="readonly", width=23)
+            entry.grid(row=row, column=1, sticky="ew", pady=5)
+            entries.append(entry)
+        ttk.Label(panel, text=hint, wraplength=440, style="Small.TLabel").grid(
+            row=len(fields), column=0, columnspan=2, sticky="w", pady=(10, 6))
+        error = tk.StringVar(master=dialog)
+        ttk.Label(panel, textvariable=error, foreground=self.RED, wraplength=440).grid(
+            row=len(fields) + 1, column=0, columnspan=2, sticky="w")
+
+        def close(event=None):
+            self.editor_window = None
+            dialog.destroy()
+
+        def accept(event=None):
+            try:
+                submit({key: var.get().strip() for key, var in values.items()})
+            except ValueError as exc:
+                error.set(str(exc))
+                return
+            close()
+
+        buttons = ttk.Frame(panel)
+        buttons.grid(row=len(fields) + 2, column=0, columnspan=2, sticky="e", pady=(10, 0))
+        ttk.Button(buttons, text="Cancel", command=close).pack(side="left", padx=4)
+        ttk.Button(buttons, text=title, command=accept, style="Accent.TButton").pack(side="left", padx=4)
+        dialog.bind("<Escape>", close)
+        dialog.bind("<Return>", accept)
+        dialog.protocol("WM_DELETE_WINDOW", close)
+        dialog.update_idletasks()
+        dialog.geometry(f"+{self.root.winfo_rootx() + max(0, (self.root.winfo_width() - dialog.winfo_width()) // 2)}"
+                        f"+{self.root.winfo_rooty() + 100}")
+        dialog.grab_set()
+        entries[0].focus_set()
+        # Expose form state to GUI smoke tests, without a nested event loop.
+        dialog.form_values = values
+        dialog.form_error = error
+        dialog.submit_form = accept
+        dialog.cancel_form = close
+        return dialog
+
+    def add_router_dialog(self, position: tuple[float, float] | None = None):
+        suggested = self.network.suggest_router()
+        x, y = position if position is not None else (suggested.x, suggested.y)
+
+        def submit(values):
+            neighbor = None if values["neighbor"] == "(none)" else values["neighbor"]
+            try:
+                cost = int(values["cost"]) if neighbor is not None else 1
+            except ValueError as exc:
+                raise ValueError("Link cost must be a positive integer.") from exc
+            router = Router(values["name"], values["address"], x, y)
+            self.engine.add_router(router, neighbor, cost)
+            self.inspector.set(router.name)
+            self.packet_target.set(router.name)
+            self.destination_ip.set(router.address)
+            self._topology_changed(f"Added router {router.name} ({router.address}/32).")
+            if neighbor is not None:
+                self.select_link(tuple(sorted((router.name, neighbor))))
+            self.tabs.select(self.live_tab)
+
+        return self._show_editor("Add router", [
+            ("name", "Router name", suggested.name, None),
+            ("address", "IPv4 loopback", suggested.address, None),
+            ("neighbor", "Connect to (optional)", "(none)", ["(none)"] + sorted(self.network.routers)),
+            ("cost", "First link cost", "1", None),
+        ], submit, "Names: 1-12 letters, digits or underscores; start with a letter. IPs must be unique. "
+           "Choose (none) for an isolated router, or add its first connection now.")
+
+    def add_link_dialog(self):
+        names = sorted(self.network.routers)
+        if len(names) < 2:
+            messagebox.showinfo("Add link", "Add another router first.", parent=self.root)
+            return None
+        a = self.inspector.get()
+        b = next((name for name in names if name != a and tuple(sorted((a, name))) not in self.network.links),
+                 next(name for name in names if name != a))
+
+        def submit(values):
+            try:
+                cost = int(values["cost"])
+            except ValueError as exc:
+                raise ValueError("Link cost must be a positive integer.") from exc
+            self.network.add_link(values["a"], values["b"], cost)
+            self._topology_changed(f"Added link {values['a']}-{values['b']}, cost {cost}.")
+            self.select_link(tuple(sorted((values["a"], values["b"]))))
+
+        return self._show_editor("Add link", [
+            ("a", "From router", a, names), ("b", "To router", b, names),
+            ("cost", "Link cost", "1", None),
+        ], submit, "Links are bidirectional. Choose two different routers and a positive integer cost. "
+           "Use the existing link editor to update a link that is already present.")
+
+    def _canvas_position(self, x: float, y: float) -> tuple[float, float]:
+        width, height = max(self.canvas.winfo_width(), 300), max(self.canvas.winfo_height(), 170)
+        bottom_margin = 55 if self.compact else 105
+        return (min(0.98, max(0.02, (x - 40) / (width - 80))),
+                min(0.98, max(0.02, (y - 42) / max(1, height - bottom_margin))))
+
+    def _add_router_at_click(self, event) -> None:
+        # A double click on an existing router/link must not create another router.
+        for item in self.canvas.find_overlapping(event.x - 4, event.y - 4, event.x + 4, event.y + 4):
+            if any(tag.startswith(("router_", "link_")) for tag in self.canvas.gettags(item)):
+                return
+        self.drag_router = None
+        self.add_router_dialog(self._canvas_position(event.x, event.y))
+
+    def _start_drag(self, event, name: str) -> None:
+        self.drag_router = name
+        x, y = self._positions()[name]
+        self.drag_offset = (event.x - x, event.y - y)
+        self.inspect_router(name)
+
+    def _drag_router(self, event) -> None:
+        if self.drag_router is None:
+            return
+        x, y = self._canvas_position(event.x - self.drag_offset[0], event.y - self.drag_offset[1])
+        self.network.move_router(self.drag_router, x, y)
+        self.draw_network()
+
+    def _end_drag(self, event=None) -> None:
+        self.drag_router = None
 
     def select_link(self, key: tuple[str, str] | None = None) -> None:
         if key is not None:
@@ -898,14 +1173,7 @@ class RoutingDemo:
         a, b = self.link_name.get().split("-")
         if not self.network.update_link(a, b, cost, self.link_up.get()):
             return
-        self._stop_everything()
-        self._clear_packet_display()
-        self.step = None
-        self.spf_note.set("Topology changed. Old installed tables are retained and marked STALE. "
-                          "Run SPF again to converge, or send a packet to test the old tables.")
-        self._log(f"TOPOLOGY revision {self.network.revision}: {a}-{b}, cost {cost}, "
-                  f"{'UP' if self.link_up.get() else 'DOWN'}. No automatic SPF.")
-        self._refresh_all()
+        self._topology_changed(f"{a}-{b}, cost {cost}, {'UP' if self.link_up.get() else 'DOWN'}.")
 
     def toggle_link(self, key: tuple[str, str]) -> None:
         self.select_link(key)
@@ -1044,6 +1312,7 @@ class RoutingDemo:
         self.draw_network()
 
     def _refresh_work_table(self) -> None:
+        old_view = self.work_tree.yview()[0]
         self.work_tree.delete(*self.work_tree.get_children())
         step = self.step
         self.work_title.set(f"DIJKSTRA WORKING STATE | root {step.source}" if step else
@@ -1062,6 +1331,7 @@ class RoutingDemo:
                           "local" if name == step.source else step.next_hop_to(name) or "--", state)
                 tags = (tag,)
             self.work_tree.insert("", "end", iid=name, values=values, tags=tags)
+        self.work_tree.yview_moveto(old_view)
         self.code_text.configure(state="normal")
         self.code_text.tag_remove("active", "1.0", "end")
         if step is not None:
@@ -1071,6 +1341,8 @@ class RoutingDemo:
         self.code_text.configure(state="disabled")
 
     def _refresh_route_table(self) -> None:
+        old_view = self.route_tree.yview()[0]
+        selected = None
         router = self.inspector.get()
         staging = (self.packet is None and self.iterator is not None and self.step is not None
                    and self.step.source == router)
@@ -1085,6 +1357,10 @@ class RoutingDemo:
                 str(route.prefix), route.next_hop or "local", route.cost, route.interface, state), tags=(tag,))
             if self.packet is not None and router == self.lookup_router and str(route.prefix) == self.highlight_prefix:
                 self.route_tree.selection_set(iid)
+                selected = iid
+        self.route_tree.yview_moveto(old_view)
+        if selected is not None:
+            self.route_tree.see(selected)
         if staging:
             note = "Finalized entries appear here one by one. This is a STAGING table, not yet used by packets. "
             note += "The complete table is installed when SPF finishes."
@@ -1113,7 +1389,7 @@ class RoutingDemo:
     def _refresh_status(self) -> None:
         current = sum(self.engine.table_status(name) == "current" for name in self.network.routers)
         activity = "SPF playing" if self.spf_auto else "packet playing" if self.packet_auto else "ready / paused"
-        self.status_text.set(f"Topology revision {self.network.revision}  |  Current SPF tables {current}/6  |  "
+        self.status_text.set(f"Topology revision {self.network.revision}  |  Current SPF tables {current}/{len(self.network.routers)}  |  "
                              f"Completed SPF runs {self.engine.spf_runs}  |  {activity}  |  "
                              "Simulation only: no real packets, no OSPF flooding; one next hop per prefix")
 
@@ -1177,7 +1453,7 @@ class RoutingDemo:
             a, b, progress = self.packet_position
             x1, y1 = positions[a]
             x2, y2 = positions[b]
-            length = math.hypot(x2 - x1, y2 - y1)
+            length = max(1.0, math.hypot(x2 - x1, y2 - y1))
             dx, dy = (x2 - x1) / length, (y2 - y1) / length
             canvas.create_line(x1 + 28 * dx, y1 + 28 * dy, x2 - 32 * dx, y2 - 32 * dy,
                                fill=self.PURPLE, width=4, arrow="last", arrowshape=(12, 14, 5))
@@ -1198,7 +1474,7 @@ class RoutingDemo:
                 canvas.create_oval(x - 32, y - 32, x + 32, y + 32, outline=self.BLUE, width=2)
             canvas.create_oval(x - 26, y - 26, x + 26, y + 26, fill=fill, outline=outline,
                                width=2, tags=(tag,))
-            canvas.create_text(x, y, text=name, fill=text, font=("Segoe UI", 17, "bold"), tags=(tag,))
+            canvas.create_text(x, y, text=name, fill=text, font=("Segoe UI", max(7, min(17, 40 // len(name))), "bold"), tags=(tag,))
             if not self.compact:
                 canvas.create_text(x, y + 43, text=f"{router.address}/32", fill=self.MUTED,
                                    font=("Segoe UI", 9), tags=(tag,))
@@ -1208,7 +1484,7 @@ class RoutingDemo:
                 canvas.create_text(x, y - (35 if self.compact else 42), text=label,
                                    fill=self.GREEN if name in step.settled else self.AMBER,
                                    font=("Segoe UI", 10, "bold"))
-            canvas.tag_bind(tag, "<Button-1>", lambda event, selected=name: self.inspect_router(selected))
+            canvas.tag_bind(tag, "<Button-1>", lambda event, selected=name: self._start_drag(event, selected))
         if self.packet:
             if self.packet_position:
                 a, b, progress = self.packet_position
@@ -1236,6 +1512,10 @@ class RoutingDemo:
         self._log(f"Exported installed tables to {filename}.")
 
     def reset_network(self) -> None:
+        if len(self.network.routers) > 6 and not messagebox.askyesno(
+                "Reset network?", "Remove all added routers and links and restore the six-router example?",
+                parent=self.root):
+            return
         self._stop_everything()
         self.network = make_default_network()
         self.engine = RoutingEngine(self.network)
@@ -1246,6 +1526,7 @@ class RoutingDemo:
         self.packet_target.set("F")
         self.destination_ip.set("10.0.0.6")
         self.ttl_value.set("16")
+        self._refresh_selectors()
         self.select_link(("D", "E"))
         self._clear_packet_display()
         self.spf_note.set("Network reset. Press New SPF or Step SPF to begin at router A.")
@@ -1265,7 +1546,7 @@ Watch the smallest tentative distance become FINAL. An amber link is being inspe
 
 2. Click Build all now, or Animate all.
 
-Each of the six routers runs Dijkstra with ITSELF as root. Click a router or open All tables to compare next hops. Computing a table only at A is not enough for intermediate routers to forward packets.
+Each router runs Dijkstra with ITSELF as root. Click a router or open All tables to compare next hops. Computing a table only at A is not enough for intermediate routers to forward packets.
 
 3. Keep source A and target F. Click New packet, then Next hop or Play packet.
 
@@ -1274,6 +1555,18 @@ The packet's destination stays 10.0.0.6. At every router, the matching /32 entry
 The default path is A -> C -> B -> D -> E -> F.
 Its cost is 2 + 3 + 2 + 1 + 2 = 10.
 A -> C -> E -> F has fewer hops, but costs 11.
+
+ADDING ROUTERS AND LINKS
+
+Click Add router, or double-click empty space on the graph. Enter a unique name and IPv4 loopback address. The program suggests the next free name (G, H, ...) and address. Optionally connect the new router to an existing router and set the link cost. Choose (none) to start with an isolated router.
+
+Use Add link to connect any two routers. New routers appear immediately in Root, Inspect router, Source and Target. Run Build all now or Animate all to calculate updated routing tables before sending packets to the new destinations.
+
+Drag a router to change its drawing position. Moving a router does not change link costs or require SPF. Duplicate names/IPs, self-links and duplicate links are rejected.
+
+Try adding G (10.0.0.7) connected to F with cost 3. Build all tables, then send A -> G: A -> C -> B -> D -> E -> F -> G, cost 13.
+
+Topology changes are kept in memory for this session. Export tables saves a JSON record including router positions, but there is no topology-import command. Reset network removes custom routers/links after confirmation.
 
 A LINK FAILURE
 

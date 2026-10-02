@@ -2,51 +2,56 @@
 
 Copyright 2026 Ib Helmer Nielsen. Licensed under Apache-2.0.
 
-## Actual environment
+## Version 1.1.0 - dynamic topology editor
 
-- CPython 3.13.5 on Linux.
-- Standard-library Tkinter with a real Tk window on an Xvfb display.
-- GUI screenshots captured from the running application, not mockups.
-- No native Windows or macOS execution was available. The source targets Python 3.10+; older Python versions were not executed here.
+Validated on 2 October 2026 using CPython 3.13.5, Linux, Tkinter/Tcl-Tk and an Xvfb display. The application and its real dialogs were exercised; screenshots are captures of the running application, not mockups. Native Windows and macOS execution and older Python versions were not available. The source targets Python 3.10+.
 
-## Automated model tests
+The previous repository's source and original test file were reconstructed from the conversation distribution and checked against their exact Git blob SHA values before editing:
 
-Command:
+- `dijkstra_routing_demo.py`: `10b7479f0084d2b37d88337a493d544a9b257767`.
+- `test_dijkstra_routing_demo.py`: `92b5e064ff676043df7eae9108b261abafbd4787`.
+
+### Test results
 
 ```text
-python -m unittest -v
+DISPLAY=:99 RUN_GUI_TESTS=1 python -m unittest -v
+Ran 52 tests
+OK
 ```
 
-Result: **27 tests passed**.
+Without RUN_GUI_TESTS, 42 model tests pass and the 10 GUI checks are deliberately skipped. This is not a GUI validation on the user's operating system.
 
-The randomized test includes 40 seeded topologies, six roots per topology, comparison against an independent Bellman-Ford implementation, and 1,440 source/destination packet traces. It covers connected and disconnected graphs.
+The unchanged 27 original model tests cover Dijkstra snapshots and route construction, hop-by-hop lookups, longest-prefix matching, TTL, link failures, stale tables, convergence, invalid input and forwarding without SPF. The original randomized comparison covers 40 graphs and 1,440 packet traces.
 
-## GUI smoke checks performed
+The 15 added model tests cover:
 
-- Create the application and process Tk events without callback errors.
-- Step through SPF and observe the tentative improvement of E through D.
-- Finish one router; verify that exactly one SPF table is installed.
-- Build all tables; verify the additional six independent SPF calculations.
-- Animate successive local forwarding lookups along A-C-B-D-E-F.
-- Verify successful delivery, cost 10, and unchanged SPF-run count during packet forwarding.
-- Disable D-E without rebuilding; verify a packet drop at D using stale tables.
-- Rebuild all tables; verify recovery over A-C-E-F with cost 11.
-- Animate all router calculations using the same scheduled tick handler.
-- Resize the application from 1440 x 900 to 1180 x 740 and check the compact graph and scrollable Live view.
-- Pause and resume the all-router queue without discarding remaining routers.
+- New local routes, retained stale tables, isolated nodes, and routes after connecting and rebuilding.
+- Adding a router with its first link as one atomic revision.
+- Shortcuts affecting forwarding only after table installation.
+- Rejection of duplicate names/IPs, invalid names/addresses/coordinates, unknown endpoints, self-links, duplicate links and invalid costs without partial edits.
+- Moving a drawing without invalidating tables or interrupting a valid SPF snapshot.
+- Unique name/address suggestions, including after Z.
+- Exported positions and newly added topology elements.
+- Five 15-router graphs built through the editing API, checked against independent Bellman-Ford distances, with 1,125 additional source/destination packet traces.
 
-## Original distribution screenshots
+The 10 opt-in GUI tests cover:
 
-The screenshot files below are part of the original Dijkstra Routing Lab ZIP distributed with the demonstration, not this source-only repository. They are not required to run the application.
+- Adding G, refreshing all four router selectors and the link selector, updating the destination IP and displaying 7/7 tables.
+- Connecting an isolated router through the Add link form.
+- Invalid/cancelled router input and duplicate links leaving the graph unchanged.
+- Adding at a canvas position and dragging with generated Tk mouse events; no route invalidation on movement.
+- Stopping pending SPF/packet callbacks when the topology changes.
+- Reset confirmation, cancellation and cleanup of dynamic selector entries.
+- 18-router routing-table scrolling with the lookup destination selected and visible.
+- Successful animated delivery A-C-B-D-E-F-G, cost 13, with seven completed SPF runs and no SPF during forwarding.
+- Overlapping router positions without a division-by-zero error in the packet arrow.
 
-`preview_spf.png` shows an intermediate SPF calculation with staged entries.
+### Additional checks and boundaries
 
-`preview_forwarding.png` shows a packet traversing D-E while D's installed entry for 10.0.0.6/32 is selected. The completed-SPF counter is 7 because this session first calculated A alone and then built all six tables.
+`python dijkstra_routing_demo.py --print-tables` still produces the original six-router example and an A-to-F trace of cost 10. Syntax compilation and the complete test suite were rerun after changes.
 
+Layout was inspected at 1440x960 and 1180x740. The tables scroll, and the graph remains editable on the compact layout. Dense graphs may require dragging nodes apart or enlarging the window. There is no automatic layout, zoom, node removal or topology import.
 
-## Repository packaging verification — 2 October 2026
+Topology edits and positions are session-local. JSON export records them, but closing or resetting the application does not persist an editable project for reopening. Reset asks for confirmation when additional routers are present.
 
-Copyright and Apache-2.0 headers, module attribution metadata, and an in-application
-Guide notice were added. The routing algorithm and forwarding implementation
-were preserved. The 27 unit tests and `--print-tables` console demonstration
-were rerun on CPython 3.13.5 / Linux. Both completed successfully.
+The demonstration remains a teaching simulation with shared topology, symmetric positive link costs, loopback /32 destinations and a single next hop per prefix. It does not implement OSPF flooding, ECMP, Ethernet or real packet transmission.
