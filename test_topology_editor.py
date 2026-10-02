@@ -213,7 +213,8 @@ class TopologyEditorGuiTests(unittest.TestCase):
     def tearDown(self):
         if self.app.editor_window is not None:
             self.app.editor_window.cancel_form()
-        self.app.close()
+        with patch('dijkstra_routing_demo.messagebox.askyesnocancel', return_value=False):
+            self.app.close()
         self.assertEqual(self.errors, [])
 
     def add_g(self, neighbor='F'):
@@ -318,10 +319,10 @@ class TopologyEditorGuiTests(unittest.TestCase):
 
     def test_reset_confirmation_and_dynamic_selector_cleanup(self):
         self.add_g()
-        with patch('dijkstra_routing_demo.messagebox.askyesno', return_value=False):
+        with patch('dijkstra_routing_demo.messagebox.askyesnocancel', return_value=None):
             self.app.reset_network()
         self.assertIn('G', self.app.network.routers)
-        with patch('dijkstra_routing_demo.messagebox.askyesno', return_value=True):
+        with patch('dijkstra_routing_demo.messagebox.askyesnocancel', return_value=False):
             self.app.reset_network()
         self.root.update()
         for selector in self.app.router_selectors:

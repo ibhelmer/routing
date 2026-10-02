@@ -32,16 +32,18 @@ import heapq
 import ipaddress
 import json
 import math
+import os
 from pathlib import Path
 import re
 import sys
+import tempfile
 import time
 from typing import Iterator
 
 __author__ = "Ib Helmer Nielsen"
 __copyright__ = "Copyright 2026 Ib Helmer Nielsen"
 __license__ = "Apache-2.0"
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 
 # ---------------------------------------------------------------------------
@@ -209,6 +211,154 @@ def make_default_network() -> Network:
         Link("D", "E", 1), Link("D", "F", 6), Link("E", "F", 2),
     ]
     return Network(routers, links)
+
+
+# ---------------------------------------------------------------------------
+# Graph persistence: JSON contains topology only, never executable/session state.
+# ---------------------------------------------------------------------------
+
+GRAPH_FORMAT = "dijkstra-routing-lab.graph"
+GRAPH_VERSION = 1
+MAX_GRAPH_BYTES = 2 * 1024 * 1024
+MAX_GRAPH_ROUTERS = 256
+MAX_GRAPH_LINKS = 16384
+MAX_GRAPH_COST = 1_000_000_000
+
+
+def graph_to_data(network: Network) -> dict:
+    """Return a deterministic, independent snapshot including drawing positions."""
+    return {
+        "format": GRAPH_FORMAT,
+        "version": GRAPH_VERSION,
+        "routers": [{"name": r.name, "address": r.address, "x": r.x, "y": r.y}
+                    for _, r in sorted(network.routers.items())],
+        "links": [{"a": link.a, "b": link.b, "cost": link.cost, "enabled": link.enabled}
+                  for _, link in sorted(network.links.items())],
+    }
+
+
+def graph_from_data(data: object) -> Network:
+    """Validate a complete graph before constructing a fresh, independent network.
+
+    Also read the original Export tables format (v1.0/v1.1). Its installed tables
+    and revision counters are deliberately ignored. Exports without positions get
+    a deterministic circular layout; saved positions are never silently repaired.
+    """
+    if not isinstance(data, dict):
+        raise ValueError("The graph file must contain a JSON object.")
+    if "format" in data:
+        if data["format"] != GRAPH_FORMAT:
+            raise ValueError("This is not a Dijkstra Routing Lab graph file.")
+        if type(data.get("version")) is not int or data["version"] != GRAPH_VERSION:
+            raise ValueError("Unsupported graph format version; this application reads version 1.")
+        rows = data.get("routers")
+    elif (data.get("model") == "Dijkstra teaching simulation; loopback destinations; no ECMP"
+          and isinstance(data.get("routers"), dict)):
+        # Migrate earlier exports without trusting their routing-table contents.
+        addresses = data["routers"]
+        if not 1 <= len(addresses) <= MAX_GRAPH_ROUTERS:
+            raise ValueError(f"A graph must contain 1-{MAX_GRAPH_ROUTERS} routers.")
+        if any(not isinstance(name, str) for name in addresses):
+            raise ValueError("Router names must be strings.")
+        positions = data.get("positions")
+        if "positions" in data and (not isinstance(positions, dict) or set(positions) != set(addresses)):
+            raise ValueError("Exported positions must contain exactly one entry per router.")
+        rows = []
+        for index, (name, address) in enumerate(sorted(addresses.items())):
+            angle = 2 * math.pi * index / len(addresses)
+            position = ({"x": 0.5 + 0.38 * math.cos(angle), "y": 0.5 + 0.38 * math.sin(angle)}
+                        if positions is None else positions[name])
+            if not isinstance(position, dict):
+                raise ValueError(f"Invalid position for router {name}.")
+            rows.append({"name": name, "address": address, "x": position.get("x"), "y": position.get("y")})
+    else:
+        raise ValueError("Choose a saved graph or a Dijkstra Routing Lab Export tables JSON file.")
+
+    if not isinstance(rows, list) or not 1 <= len(rows) <= MAX_GRAPH_ROUTERS:
+        raise ValueError(f"The routers field must be a list of 1-{MAX_GRAPH_ROUTERS} routers.")
+    routers = []
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict) or not {"name", "address", "x", "y"} <= row.keys():
+            raise ValueError(f"Router entry {index + 1} needs name, address, x and y.")
+        if not isinstance(row["name"], str) or not isinstance(row["address"], str):
+            raise ValueError("Router names and IPv4 addresses must be strings.")
+        router = Router(row["name"], row["address"], row["x"], row["y"])
+        try:
+            Network._validate_router(router)
+        except (ValueError, OverflowError) as error:
+            raise ValueError(f"Invalid router entry {index + 1}: {error}") from error
+        routers.append(router)
+
+    entries = data.get("links")
+    if not isinstance(entries, list) or len(entries) > MAX_GRAPH_LINKS:
+        raise ValueError(f"The links field must be a list with at most {MAX_GRAPH_LINKS} entries.")
+    links = []
+    for index, row in enumerate(entries):
+        if not isinstance(row, dict) or not {"a", "b", "cost", "enabled"} <= row.keys():
+            raise ValueError(f"Link entry {index + 1} needs a, b, cost and enabled.")
+        if not isinstance(row["a"], str) or not isinstance(row["b"], str):
+            raise ValueError("Link endpoints must be router names.")
+        if type(row["enabled"]) is not bool:
+            raise ValueError("Link enabled must be true or false, not a string or number.")
+        if type(row["cost"]) is not int or not 1 <= row["cost"] <= MAX_GRAPH_COST:
+            raise ValueError(f"Link cost must be an integer from 1 to {MAX_GRAPH_COST}.")
+        links.append(Link(row["a"], row["b"], row["cost"], row["enabled"]))
+    # Network checks duplicate names/IPs/links, self-links and unknown endpoints.
+    return Network(routers, links)
+
+
+def _unique_json_object(pairs: list[tuple[str, object]]) -> dict:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"Duplicate JSON field: {key}.")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"Non-finite JSON number is not allowed: {value}.")
+
+
+def load_graph_file(filename: str | Path) -> Network:
+    """Read bounded UTF-8 JSON; failure never modifies an existing network."""
+    with Path(filename).open("rb") as stream:
+        raw = stream.read(MAX_GRAPH_BYTES + 1)
+    if len(raw) > MAX_GRAPH_BYTES:
+        raise ValueError("The graph file is too large (maximum 2 MiB).")
+    try:
+        data = json.loads(raw.decode("utf-8-sig"), object_pairs_hook=_unique_json_object,
+                          parse_constant=_reject_json_constant)
+    except (UnicodeError, json.JSONDecodeError, RecursionError) as error:
+        raise ValueError(f"Cannot read this UTF-8 JSON graph: {error}") from error
+    return graph_from_data(data)
+
+
+def save_graph_file(network: Network, filename: str | Path) -> None:
+    """Validate, then replace the destination via a temporary file in its directory.
+
+    Close the temporary file BEFORE os.replace(), including on Windows. A failed
+    write/replacement leaves an existing destination untouched. This is not a
+    backup system and does not promise power-loss durability on every filesystem.
+    """
+    data = graph_to_data(network)
+    graph_from_data(data)  # Never write a file that this version cannot load.
+    raw = (json.dumps(data, indent=2, ensure_ascii=True, allow_nan=False) + "\n").encode("utf-8")
+    if len(raw) > MAX_GRAPH_BYTES:
+        raise ValueError("The graph is too large to save (maximum 2 MiB).")
+    destination = Path(filename)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="wb", dir=destination.parent,
+                                         prefix=f".{destination.name}.", suffix=".tmp", delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, destination)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -525,6 +675,8 @@ class RoutingDemo:
         self.root.configure(background=self.BG)
         self.network = make_default_network()
         self.engine = RoutingEngine(self.network)
+        self.graph_file: Path | None = None
+        self.saved_graph = graph_to_data(self.network)
         self.step: DijkstraStep | None = None
         self.iterator: Iterator[DijkstraStep] | None = None
         self.run_revision = self.network.revision
@@ -600,11 +752,30 @@ class RoutingDemo:
         header.columnconfigure(0, weight=1)
         ttk.Label(header, text="Dijkstra Routing Lab", style="Title.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Label(header, text="01  Calculate shortest paths     02  Install next hops     03  Forward IP packets",
-                  style="Small.TLabel").grid(row=1, column=0, sticky="w")
+                  style="Small.TLabel").grid(row=1, column=0, columnspan=7, sticky="w")
         ttk.Button(header, text="Add router", command=self.add_router_dialog).grid(row=0, column=1, padx=5)
         ttk.Button(header, text="Add link", command=self.add_link_dialog).grid(row=0, column=2, padx=5)
-        ttk.Button(header, text="Export tables", command=self.export_tables).grid(row=0, column=3, padx=5)
-        ttk.Button(header, text="Reset network", command=self.reset_network).grid(row=0, column=4)
+        ttk.Button(header, text="Save graph", command=self.save_graph).grid(row=0, column=3, padx=5)
+        ttk.Button(header, text="Load graph", command=self.load_graph).grid(row=0, column=4, padx=5)
+        ttk.Button(header, text="Export tables", command=self.export_tables).grid(row=0, column=5, padx=5)
+        ttk.Button(header, text="Reset network", command=self.reset_network).grid(row=0, column=6)
+        menu = tk.Menu(self.root)
+        files = tk.Menu(menu, tearoff=False)
+        files.add_command(label="Save graph", accelerator="Ctrl+S", command=self.save_graph)
+        files.add_command(label="Save graph as...", accelerator="Ctrl+Shift+S",
+                          command=lambda: self.save_graph(save_as=True))
+        files.add_command(label="Load graph...", accelerator="Ctrl+O", command=self.load_graph)
+        files.add_separator()
+        files.add_command(label="Export tables...", command=self.export_tables)
+        files.add_command(label="Reset network", command=self.reset_network)
+        files.add_separator()
+        files.add_command(label="Exit", command=self.close)
+        menu.add_cascade(label="File", menu=files)
+        self.root.configure(menu=menu)
+        for binding, command in (("<Control-s>", self.save_graph),
+                                 ("<Control-Shift-S>", lambda: self.save_graph(save_as=True)),
+                                 ("<Control-o>", self.load_graph)):
+            self.root.bind(binding, lambda event, action=command: (action(), "break")[1])
 
         controls = ttk.LabelFrame(outer, text="CONTROL PLANE  |  Dijkstra / shortest-path first", padding=(9, 6))
         controls.grid(row=1, column=0, sticky="ew", pady=(0, 6))
@@ -633,7 +804,8 @@ class RoutingDemo:
         ttk.Label(links, text="Cost").pack(side="left", padx=(10, 4))
         ttk.Spinbox(links, textvariable=self.link_cost, from_=1, to=9999, width=6).pack(side="left")
         ttk.Checkbutton(links, text="Link up", variable=self.link_up).pack(side="left", padx=8)
-        ttk.Button(links, text="Apply change", command=self.apply_link).pack(side="left")
+        self.apply_link_button = ttk.Button(links, text="Apply change", command=self.apply_link)
+        self.apply_link_button.pack(side="left")
         ttk.Label(links, text="Changes leave installed tables stale until SPF runs again.",
                   style="Small.TLabel").pack(side="left", padx=12)
 
@@ -994,8 +1166,12 @@ class RoutingDemo:
         self.link_selector.configure(values=links)
         if self.link_name.get() not in links:
             self.link_name.set(links[0] if links else "")
+        self.apply_link_button.configure(state="normal" if links else "disabled")
         if links:
             self.select_link()
+        else:
+            self.link_cost.set("1")
+            self.link_up.set(False)
 
     def _topology_changed(self, message: str) -> None:
         self._stop_everything()
@@ -1151,11 +1327,14 @@ class RoutingDemo:
         x, y = self._canvas_position(event.x - self.drag_offset[0], event.y - self.drag_offset[1])
         self.network.move_router(self.drag_router, x, y)
         self.draw_network()
+        self._refresh_graph_title()
 
     def _end_drag(self, event=None) -> None:
         self.drag_router = None
 
     def select_link(self, key: tuple[str, str] | None = None) -> None:
+        if not self.network.links:
+            return
         if key is not None:
             self.link_name.set("-".join(key))
         a, b = self.link_name.get().split("-")
@@ -1164,6 +1343,8 @@ class RoutingDemo:
         self.link_up.set(link.enabled)
 
     def apply_link(self) -> None:
+        if not self.link_name.get():
+            return
         try:
             cost = int(self.link_cost.get())
             self.network._validate_cost(cost)
@@ -1305,6 +1486,7 @@ class RoutingDemo:
         return int(self.speed.get() * 1000)
 
     def _refresh_all(self) -> None:
+        self._refresh_graph_title()
         self._refresh_work_table()
         self._refresh_route_table()
         self._refresh_all_tables()
@@ -1511,29 +1693,128 @@ class RoutingDemo:
             return
         self._log(f"Exported installed tables to {filename}.")
 
-    def reset_network(self) -> None:
-        if len(self.network.routers) > 6 and not messagebox.askyesno(
-                "Reset network?", "Remove all added routers and links and restore the six-router example?",
-                parent=self.root):
-            return
+    def _refresh_graph_title(self) -> None:
+        marker = " *" if self.has_unsaved_graph() else ""
+        filename = self.graph_file.name if self.graph_file else "Untitled graph"
+        self.root.title(f"Dijkstra Routing Lab {__version__} | {filename}{marker}")
+
+    def has_unsaved_graph(self) -> bool:
+        # A drawing move does not increment the routing revision but IS a file edit.
+        # SPF runs and packet movement do not alter this topology-only snapshot.
+        return graph_to_data(self.network) != self.saved_graph
+
+    def _pause_for_file_dialog(self) -> bool:
+        if self.editor_window is not None and self.editor_window.winfo_exists():
+            self.editor_window.lift()
+            return False
+        self._pause_spf()
+        self._cancel_packet()  # Retain the packet and installed tables, only pause.
+        self.draw_network()
+        self._refresh_status()
+        return True
+
+    def save_graph(self, save_as: bool = False) -> bool:
+        """Return False on cancellation/failure, including before a destructive action."""
+        if not self._pause_for_file_dialog():
+            return False
+        filename = self.graph_file
+        if save_as or filename is None:
+            options = {"initialdir": str(filename.parent)} if filename else {}
+            chosen = filedialog.asksaveasfilename(
+                parent=self.root, title="Save graph", defaultextension=".json",
+                initialfile=filename.name if filename else "network.graph.json",
+                filetypes=[("JSON graph", "*.json"), ("All files", "*")], **options)
+            if not chosen:
+                return False
+            filename = Path(chosen)
+        try:
+            save_graph_file(self.network, filename)
+        except (OSError, ValueError, OverflowError) as error:
+            messagebox.showerror("Save graph failed", str(error), parent=self.root)
+            return False
+        self.graph_file = filename
+        self.saved_graph = graph_to_data(self.network)
+        self._refresh_graph_title()
+        self._log(f"SAVED GRAPH: {filename} ({len(self.network.routers)} routers, "
+                  f"{len(self.network.links)} links, including drawing positions).")
+        return True
+
+    def _confirm_replace_graph(self, action: str) -> bool:
+        if not self.has_unsaved_graph():
+            return True
+        answer = messagebox.askyesnocancel(
+            "Unsaved graph", f"Save graph changes before {action}?\n\n"
+            "Yes: save and continue. No: discard changes. Cancel: keep working.", parent=self.root)
+        if answer is None:
+            return False
+        return self.save_graph() if answer else True
+
+    def _install_graph(self, network: Network, filename: Path | None = None) -> None:
+        """Swap validated topology and clear every state item referring to the old graph."""
         self._stop_everything()
-        self.network = make_default_network()
-        self.engine = RoutingEngine(self.network)
+        self.network = network
+        self.engine = RoutingEngine(network)
+        self.graph_file = filename
+        self.saved_graph = graph_to_data(network)
         self.step = None
-        self.spf_root.set("A")
-        self.inspector.set("A")
-        self.packet_source.set("A")
-        self.packet_target.set("F")
-        self.destination_ip.set("10.0.0.6")
+        self.run_revision = network.revision
+        self.drag_router = None
+        self.packet_sequence = 0
+        self.step_count = 0
+        names = sorted(network.routers)
+        self.spf_root.set(names[0])
+        self.inspector.set(names[0])
+        self.packet_source.set(names[0])
+        self.packet_target.set(names[-1])
+        self.destination_ip.set(network.routers[names[-1]].address)
         self.ttl_value.set("16")
         self._refresh_selectors()
-        self.select_link(("D", "E"))
         self._clear_packet_display()
+        self._refresh_all()
+        self.tabs.select(self.live_tab)
+
+    def load_graph(self) -> bool:
+        if not self._pause_for_file_dialog():
+            return False
+        options = {"initialdir": str(self.graph_file.parent)} if self.graph_file else {}
+        chosen = filedialog.askopenfilename(parent=self.root, title="Load graph",
+                                           filetypes=[("JSON graph", "*.json"), ("All files", "*")], **options)
+        if not chosen:
+            return False
+        # Validate FIRST, then ask to replace: an invalid file leaves the current
+        # graph, file association, unsaved marker and installed routes untouched.
+        try:
+            network = load_graph_file(chosen)
+        except (OSError, ValueError, OverflowError) as error:
+            messagebox.showerror("Load graph failed", str(error), parent=self.root)
+            return False
+        if not self._confirm_replace_graph("loading another graph"):
+            return False
+        # Saving first may have overwritten the selected file (including Ctrl+O
+        # on the current graph). Re-read so memory and disk cannot disagree.
+        try:
+            network = load_graph_file(chosen)
+        except (OSError, ValueError, OverflowError) as error:
+            messagebox.showerror("Load graph failed", str(error), parent=self.root)
+            return False
+        self._install_graph(network, Path(chosen))
+        self.spf_note.set("Graph loaded. Only local routes are installed. "
+                          "Use Build all now or Animate all to calculate the routing tables.")
+        self._log(f"LOADED GRAPH: {chosen}. {len(network.routers)} routers and "
+                  f"{len(network.links)} links; previous SPF and packet state cleared.")
+        return True
+
+    def reset_network(self) -> None:
+        if not self._pause_for_file_dialog() or not self._confirm_replace_graph("resetting the network"):
+            return
+        self._install_graph(make_default_network())
+        self.select_link(("D", "E"))
         self.spf_note.set("Network reset. Press New SPF or Step SPF to begin at router A.")
         self._log("RESET: restored default topology; all routers have local routes only.")
-        self._refresh_all()
 
     def close(self) -> None:
+        if not self._pause_for_file_dialog() or not self._confirm_replace_graph("closing"):
+            return
         self._stop_everything()
         self.root.destroy()
 
@@ -1566,7 +1847,15 @@ Drag a router to change its drawing position. Moving a router does not change li
 
 Try adding G (10.0.0.7) connected to F with cost 3. Build all tables, then send A -> G: A -> C -> B -> D -> E -> F -> G, cost 13.
 
-Topology changes are kept in memory for this session. Export tables saves a JSON record including router positions, but there is no topology-import command. Reset network removes custom routers/links after confirmation.
+SAVING AND LOADING GRAPHS
+
+Save graph (Ctrl+S) writes routers, IPv4 addresses, positions, links, costs and up/down states to a JSON file. The first save asks for a filename. File > Save graph as... (Ctrl+Shift+S) saves another copy.
+
+Load graph (Ctrl+O) restores a saved graph, replacing the current network. Routing tables and packet/algorithm progress are deliberately not restored. Click Build all now or Animate all after loading.
+
+A * in the window title means the graph has unsaved changes, including moved nodes. Load, Reset and Exit offer Save / Discard / Cancel before losing edits. Cancelling a file dialog keeps the current graph; playback is paused.
+
+Earlier Export tables JSON files can also be loaded. Positions from v1.1 are retained; older files without positions use a circular layout. Export tables remains a separate report, not a saved simulation session.
 
 A LINK FAILURE
 

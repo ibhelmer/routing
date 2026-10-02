@@ -2,7 +2,57 @@
 
 Copyright 2026 Ib Helmer Nielsen. Licensed under Apache-2.0.
 
-## Version 1.1.0 - dynamic topology editor
+## Version 1.2.0 - saved and loadable graphs
+
+Validated on 2 October 2026 using CPython 3.13.5 on Linux with Tkinter/Tcl-Tk and an Xvfb display. The v1.1.0 source archive was checked against the current GitHub tree at commit `b9d8a57d7593e026eb9eb731125b9d6e7e8e355a` before editing; its application blob was `fb03bbb5ef3627962f93de6a46872d875dabcf40`.
+
+```text
+DISPLAY=:99 RUN_GUI_TESTS=1 python -m unittest -v
+Ran 86 tests
+OK
+```
+
+Without `RUN_GUI_TESTS=1`, 63 tests pass and 23 opt-in GUI tests are skipped. The original 27 routing tests remain unchanged. The prior 25 topology tests still pass; their reset and cleanup confirmations were adapted to Save / Discard / Cancel.
+
+### Added storage checks (21 tests)
+
+- Full round-trip of custom routers, IPv4 addresses, fractional coordinates, changed costs and disabled links.
+- Fresh local-only routing engines after load, followed by the expected A-to-G path of cost 13 after recalculation.
+- A one-router graph without links.
+- Earlier Export tables formats, with and without recorded positions; exported route state is ignored.
+- Malformed JSON/UTF-8, duplicate JSON keys, unknown schema versions, incorrect field types, non-finite or out-of-range coordinates, duplicate names/IPs/links and invalid endpoints.
+- Input size and router-count bounds.
+- Successful repeated saves and temporary-file cleanup.
+- Injected fsync/replace failures leaving an existing destination unchanged.
+- Missing directories/files and validation failures.
+- Ten seeded ten-router graph round-trips, matching tables after recalculation and 1,000 source/destination packet comparisons before and after persistence.
+
+### Added Tk checks (13 tests)
+
+- Real application save/load handlers, widget updates, restored positions and rebuilt routing state.
+- Loading a graph with neither default router names nor links, then returning to the default graph.
+- Invalid or cancelled loads preserving the current graph and routing tables.
+- Cancel, failed save and cancelled save all aborting a pending replacement.
+- Saving then reopening the same file retaining the newly saved content in memory.
+- Dirty markers for node movement, but not SPF/packet actions.
+- Save As preserving the original and selecting the new file.
+- Loading cancelling old SPF, packet, frame and selection state.
+- Save / Discard / Cancel for reset and exit.
+- File shortcuts blocked while a router editor dialog is active.
+
+Native file-chooser results and messagebox answers are mocked for deterministic automation. Tests use real Tk widgets and callback code. Native Windows/macOS dialogs and execution were not tested. Python versions earlier than 3.13.5 were not executed; syntax compatibility with Python 3.10 is checked separately.
+
+### Manual layout and smoke checks
+
+The running application was inspected at 1440x960 and 1180x740, including the Save graph / Load graph buttons, File menu, filename/dirty marker and a reloaded seven-router graph. Screenshots are actual captures, not mockups. The headless six-router demonstration still produces A-C-B-D-E-F, cost 10.
+
+The graph format does not save installed tables, packet state or a suspended simulation. It stores topology and positions only. Power-loss behavior and network-filesystem atomicity were not tested. The application still does not implement OSPF flooding, ECMP, real network traffic, automatic layout, node removal or zoom.
+
+## Historical version 1.1.0 record
+
+The following record describes the previous version. Its session-only storage limitation is superseded by v1.2.0.
+
+### Version 1.1.0 - dynamic topology editor
 
 Validated on 2 October 2026 using CPython 3.13.5, Linux, Tkinter/Tcl-Tk and an Xvfb display. The application and its real dialogs were exercised; screenshots are captures of the running application, not mockups. Native Windows and macOS execution and older Python versions were not available. The source targets Python 3.10+.
 

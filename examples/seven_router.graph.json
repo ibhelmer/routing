@@ -1,0 +1,110 @@
+{
+  "format": "dijkstra-routing-lab.graph",
+  "version": 1,
+  "routers": [
+    {
+      "name": "A",
+      "address": "10.0.0.1",
+      "x": 0.11,
+      "y": 0.5
+    },
+    {
+      "name": "B",
+      "address": "10.0.0.2",
+      "x": 0.35,
+      "y": 0.2
+    },
+    {
+      "name": "C",
+      "address": "10.0.0.3",
+      "x": 0.35,
+      "y": 0.8
+    },
+    {
+      "name": "D",
+      "address": "10.0.0.4",
+      "x": 0.64,
+      "y": 0.2
+    },
+    {
+      "name": "E",
+      "address": "10.0.0.5",
+      "x": 0.64,
+      "y": 0.8
+    },
+    {
+      "name": "F",
+      "address": "10.0.0.6",
+      "x": 0.89,
+      "y": 0.5
+    },
+    {
+      "name": "G",
+      "address": "10.0.0.7",
+      "x": 0.89,
+      "y": 0.93
+    }
+  ],
+  "links": [
+    {
+      "a": "A",
+      "b": "B",
+      "cost": 7,
+      "enabled": true
+    },
+    {
+      "a": "A",
+      "b": "C",
+      "cost": 2,
+      "enabled": true
+    },
+    {
+      "a": "B",
+      "b": "C",
+      "cost": 3,
+      "enabled": true
+    },
+    {
+      "a": "B",
+      "b": "D",
+      "cost": 2,
+      "enabled": true
+    },
+    {
+      "a": "C",
+      "b": "D",
+      "cost": 8,
+      "enabled": true
+    },
+    {
+      "a": "C",
+      "b": "E",
+      "cost": 7,
+      "enabled": true
+    },
+    {
+      "a": "D",
+      "b": "E",
+      "cost": 1,
+      "enabled": true
+    },
+    {
+      "a": "D",
+      "b": "F",
+      "cost": 6,
+      "enabled": true
+    },
+    {
+      "a": "E",
+      "b": "F",
+      "cost": 2,
+      "enabled": true
+    },
+    {
+      "a": "G",
+      "b": "F",
+      "cost": 3,
+      "enabled": true
+    }
+  ]
+}

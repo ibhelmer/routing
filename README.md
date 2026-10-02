@@ -4,7 +4,7 @@
 
 Repository: [ibhelmer/routing](https://github.com/ibhelmer/routing)
 
-**Version 1.1.0:** add routers and links interactively; drag nodes to arrange the graph.
+**Version 1.2.0:** save and load editable graphs, including node positions; keep multiple classroom topologies as JSON files. Adds unsaved-change protection and imports of earlier table exports.
 
 An interactive Python teaching example that makes two different activities visible:
 
@@ -153,7 +153,7 @@ Adding G without a connection is also valid: it stays unreachable from other rou
 
 The working and routing tables have scrollbars; the forwarding lookup scrolls the selected route into view. Router counts, selector contents and the all-router SPF queue are dynamic rather than fixed at six. Suggested names continue with R1, R2, and so on after Z. A crowded graph may need manual rearrangement or a larger window; automatic graph layout and zoom are not implemented.
 
-**Session storage:** additions and positions are kept in memory. **Export tables** saves a JSON record of all routers, links, installed routes, versions and positions, but there is currently no topology-import command. **Reset network** asks for confirmation when custom routers exist, then restores the original A-F example. Closing the program also discards the edited topology.
+**Persistence:** use **Save graph** and **Load graph** to keep editable topologies between sessions. The saved graph includes node positions and link up/down states. See the next section for the workflow, file format and compatibility with earlier table exports.
 
 ### Use the editor model from Python
 
@@ -170,6 +170,88 @@ assert packet.total_cost == 13
 ```
 
 Use **`engine.add_router(...)`** when a routing engine already exists: this registers the new local route as well as the node. `Network.add_router(...)` is the lower-level topology operation for use before constructing an engine. A topology edit stops current GUI animations and abandons incomplete SPF work; simply opening and cancelling a dialog pauses playback without changing the graph or installed routes.
+
+## Save and load graphs
+
+### Save a classroom topology
+
+Create or move routers, add connections, and adjust link costs or up/down states. Click **Save graph**, or press **Ctrl+S**. The first save opens a file chooser with the suggested filename `network.graph.json`. Select a folder and filename, such as `classroom_network.graph.json`.
+
+Further saves update the same file. **File > Save graph as...** (**Ctrl+Shift+S**) writes a separate copy and makes it the current file. Use this to keep alternative exercises without overwriting the original. All files are ordinary UTF-8 JSON; the application uses no database, cloud account or additional package.
+
+The graph file stores:
+
+| Saved property | Details |
+|---|---|
+| Routers | Unique name and IPv4 loopback address |
+| Layout | Each router's normalized `x` and `y` coordinates |
+| Links | Both endpoints, the positive integer cost, and `enabled` (`true` or `false`) |
+| File identity | `format` marker and integer schema `version` |
+
+**Not saved:** installed or staged routing tables, SPF progress, topology revision history, packet traces, TTL, animation progress, selection state and event logs. Save graph is a topology document, not a suspended simulation session. Coordinates are relative to the drawing area, so the layout adapts to another window size.
+
+### Reopen a graph
+
+Click **Load graph**, or press **Ctrl+O**, and select the saved JSON file. Loading **replaces** the current graph; it does not merge networks. Nodes, IP addresses, positions, connections, costs and failed links are restored together. Selectors and the link editor are rebuilt even when the file uses no A-F router names or contains a single isolated router.
+
+Each loaded router initially knows **only its local /32 route**. Previous packets and pending SPF callbacks are cleared. Click **Build all now** to calculate all routing tables, or **Animate all** to watch the calculation, and then send a new packet.
+
+An example is included at [`examples/seven_router.graph.json`](examples/seven_router.graph.json). Load it, build all tables, then send **A -> G**. The route is **A-C-B-D-E-F-G**, cost **13**.
+
+### Unsaved changes and failures
+
+A **`*` in the window title** means that topology or drawing positions have changed since the last save or load. Running Dijkstra or forwarding a packet does not mark the graph as modified. Loading, resetting, or closing with unsaved changes prompts:
+
+- **Yes:** save, then continue. Cancelling or failing that save cancels the pending operation.
+- **No:** discard those edits and continue.
+- **Cancel:** keep the current graph and return to it.
+
+File operations pause automatic playback. Cancelling a file dialog or rejecting an invalid file keeps the current graph and installed tables. Playback remains paused and can be resumed. A loaded file is fully parsed and validated before it replaces the current network.
+
+Saving validates and serializes the graph, writes a temporary file in the same directory, closes it, and then replaces the destination with `os.replace`. Failed writes/replacements do not intentionally truncate an existing graph. This is not a backup system or a guarantee against power loss on every filesystem. Keep separate copies of important classroom scenarios.
+
+### Earlier Export tables files
+
+**Load graph** also accepts JSON produced by the earlier **Export tables** button:
+
+- v1.1 exports restore the recorded router positions.
+- Older exports without positions use a deterministic circular layout.
+- Exported routing tables and revision counters are ignored; routes are rebuilt from the imported graph.
+
+**Export tables** remains a separate inspection report. Exporting does **not** clear the graph's unsaved marker. Saving after opening an older export rewrites the selected file in the new graph-only format; use **Save graph as...** to preserve the original report.
+
+### JSON schema and Python API
+
+The native format uses the marker `dijkstra-routing-lab.graph` and schema version `1`. Each router record requires `name`, `address`, `x`, `y`; each link requires `a`, `b`, `cost`, `enabled`. A compact example:
+
+```json
+{
+  "format": "dijkstra-routing-lab.graph",
+  "version": 1,
+  "routers": [
+    {"name": "R1", "address": "192.0.2.1", "x": 0.2, "y": 0.5},
+    {"name": "R2", "address": "192.0.2.2", "x": 0.8, "y": 0.5}
+  ],
+  "links": [
+    {"a": "R1", "b": "R2", "cost": 5, "enabled": true}
+  ]
+}
+```
+
+Import enforces the same router name/address/position and topology constraints as the editor, including unique names/IPs, known endpoints, no self-links and no parallel links. The file reader additionally requires actual JSON booleans, rejects duplicate JSON fields, non-finite values in graph coordinates, and unknown format versions. Input is bounded to **2 MiB**, **256 routers**, **16,384 links** and link costs from **1 to 1,000,000,000**. These are persistence limits, not a performance guarantee for dense classroom graphs. Graph files are parsed as data; no `pickle`, `eval` or imported code is used.
+
+```python
+from dijkstra_routing_demo import (
+    RoutingEngine, load_graph_file, make_default_network, save_graph_file,
+)
+
+save_graph_file(make_default_network(), "my_network.graph.json")
+network = load_graph_file("my_network.graph.json")
+engine = RoutingEngine(network)
+engine.calculate_all()  # Rebuild, rather than trust saved forwarding state.
+```
+
+`graph_to_data(network)` and `graph_from_data(data)` expose serialization and validation without filesystem access. `load_graph_file` returns a fresh `Network`; attach it to a new `RoutingEngine`. Replacing only `engine.network` would leave old table state behind and is not supported.
 
 ## Link editor and failure experiments
 
@@ -212,7 +294,9 @@ All application code is in `dijkstra_routing_demo.py` so that a single file is s
 | `RoutingEngine.lookup()` | Longest-prefix matching in one router's installed table |
 | `forward_one_hop()` | One table lookup and one forwarding/delivery/drop decision |
 | `trace_packet()` | Headless end-to-end trace using repeated one-hop decisions |
-| `RoutingDemo` | Tkinter interface and non-blocking `after()` animations |
+| `graph_to_data()`, `graph_from_data()` | Versioned topology serialization and validation; legacy export migration |
+| `save_graph_file()`, `load_graph_file()` | Bounded JSON file I/O and temporary-file replacement |
+| `RoutingDemo` | Tkinter interface, file actions, unsaved-change protection, and non-blocking `after()` animations |
 
 For example, use the same model without the GUI:
 
@@ -246,34 +330,24 @@ TTL decreases on forwarding and not on local delivery. Drops are logged, but no 
 
 ## Verification
 
-The test suite now contains **52 tests: 42 model tests and 10 opt-in GUI tests**. All 52 passed during the Linux/Xvfb validation of version 1.1.0.
-
-`test_dijkstra_routing_demo.py` preserves the original 27 tests, including 40 random graphs checked against an independent Bellman-Ford reference and 1,440 source/destination packet traces. `test_topology_editor.py` adds 15 model tests and 10 GUI checks. Its larger-graph reference test checks another 1,125 source/destination pairs across five 15-router graphs built with the editing API.
-
-Normal, display-independent test run (42 pass; 10 GUI checks are deliberately skipped):
+There are **86 tests**: **63 model/storage tests** and **23 opt-in Tk GUI tests**. The original 27 routing-model tests are unchanged; the topology-editor tests now exercise the new Save / Discard / Cancel reset prompt. `test_graph_storage.py` adds 21 storage tests and 13 GUI tests.
 
 ```bash
+# No graphical display required: 63 pass, 23 GUI checks are skipped.
 python -m unittest -v
-```
 
-To include the real Tk window checks, run on a graphical desktop:
-
-```powershell
-# Windows PowerShell
-$env:RUN_GUI_TESTS = "1"
-python -m unittest -v
-```
-
-```bash
-# Linux / macOS with a graphical display
+# With a working graphical desktop:
 RUN_GUI_TESTS=1 python -m unittest -v
-# A headless Linux machine with Xvfb installed
+
+# A headless Linux machine with Xvfb installed:
 RUN_GUI_TESTS=1 xvfb-run -a python -m unittest -v
 ```
 
-The new GUI checks cover both editor forms, cancelled/invalid edits, dynamic dropdowns, isolated nodes, node dragging, interruption of animations, reset confirmation, larger-table scrolling, overlapping node positions, and an animated A-to-G delivery without further SPF runs.
+On PowerShell, set `$env:RUN_GUI_TESTS = "1"` before invoking unittest to opt in to GUI tests. Native file-chooser return values and confirmation answers are mocked for repeatability; the Tk application, widgets, callbacks and routing model are real.
 
-See `VALIDATION.md` for the actual environment and limitations. Native Windows and macOS execution were not available for this update.
+New checks cover full save/load round-trips, 10 randomized 10-router networks and 1,000 before/after packet-route comparisons, malformed JSON, strict field validation, legacy imports, failed save cleanup, single-node/zero-link loading, state reset, pending-animation cancellation, Save As, dirty tracking, and cancellation/failure before replacing a graph. Loading the current file after saving pending edits is checked to keep disk and memory consistent.
+
+See `VALIDATION.md` for the actual environment and limits of verification. Native Windows and macOS execution were not available for this update.
 
 ## Primary references
 
@@ -283,6 +357,7 @@ The implementation is an original teaching example based on the principles below
 - [RFC 2328, section 16.1.1: next-hop calculation](https://www.rfc-editor.org/rfc/rfc2328.html#section-16.1.1).
 - [RFC 1812: IPv4 forwarding, longest-prefix matching, and TTL](https://www.rfc-editor.org/info/rfc1812/).
 - [Python Tkinter documentation](https://docs.python.org/3/library/tkinter.html).
+- [Python JSON documentation](https://docs.python.org/3/library/json.html), [temporary files](https://docs.python.org/3/library/tempfile.html), and [`os.replace`](https://docs.python.org/3/library/os.html#os.replace).
 - [Ubuntu python3-tk package](https://packages.ubuntu.com/questing/python3-tk) and [Debian python3-tk package](https://packages.debian.org/sid/python3-tk).
 
 
@@ -293,6 +368,8 @@ The implementation is an original teaching example based on the principles below
 | `dijkstra_routing_demo.py` | Complete GUI and independently usable routing model |
 | `test_dijkstra_routing_demo.py` | Original 27 model tests, including randomized reference comparisons |
 | `test_topology_editor.py` | 15 additional model tests and 10 opt-in graphical tests |
+| `test_graph_storage.py` | 21 storage/model tests and 13 opt-in graphical tests |
+| `examples/seven_router.graph.json` | Loadable example with G connected to F at cost 3 |
 | `run_demo.bat` | Windows launcher |
 | `README.md` | Installation, classroom walkthrough, experiments, and design notes |
 | `VALIDATION.md` | Validation environment, performed checks, and limitations |
