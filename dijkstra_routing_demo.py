@@ -44,7 +44,7 @@ import webbrowser
 __author__ = "Ib Helmer Nielsen"
 __copyright__ = "Copyright 2026 Ib Helmer Nielsen"
 __license__ = "Apache-2.0"
-__version__ = "1.3.1"
+__version__ = "1.4.0"
 
 APP_NAME = "Dijkstra Routing Lab"
 REPOSITORY_URL = "https://github.com/ibhelmer/routing"
@@ -99,8 +99,8 @@ class Network:
 
     def __init__(self, routers: list[Router], links: list[Link]) -> None:
         self.routers = {router.name: router for router in routers}
-        if not routers or len(self.routers) != len(routers):
-            raise ValueError("Router names must be unique; at least one is required.")
+        if len(self.routers) != len(routers):
+            raise ValueError("Router names must be unique.")
         addresses = [router.address for router in routers]
         if len(set(addresses)) != len(addresses):
             raise ValueError("Router loopback addresses must be unique.")
@@ -184,6 +184,8 @@ class Network:
         address = ipaddress.IPv4Address("10.0.0.1")
         while address in used:
             address += 1
+        if not self.routers:
+            return Router(name, str(address), 0.5, 0.5)
         # Choose the grid point furthest from existing routers.
         points = [(x / 10, y / 10) for x in range(1, 10) for y in range(1, 10)]
         x, y = max(points, key=lambda point: min(
@@ -276,8 +278,8 @@ def graph_from_data(data: object) -> Network:
           and isinstance(data.get("routers"), dict)):
         # Migrate earlier exports without trusting their routing-table contents.
         addresses = data["routers"]
-        if not 1 <= len(addresses) <= MAX_GRAPH_ROUTERS:
-            raise ValueError(f"A graph must contain 1-{MAX_GRAPH_ROUTERS} routers.")
+        if not 0 <= len(addresses) <= MAX_GRAPH_ROUTERS:
+            raise ValueError(f"A graph must contain 0-{MAX_GRAPH_ROUTERS} routers.")
         if any(not isinstance(name, str) for name in addresses):
             raise ValueError("Router names must be strings.")
         positions = data.get("positions")
@@ -294,8 +296,8 @@ def graph_from_data(data: object) -> Network:
     else:
         raise ValueError("Choose a saved graph or a Dijkstra Routing Lab Export tables JSON file.")
 
-    if not isinstance(rows, list) or not 1 <= len(rows) <= MAX_GRAPH_ROUTERS:
-        raise ValueError(f"The routers field must be a list of 1-{MAX_GRAPH_ROUTERS} routers.")
+    if not isinstance(rows, list) or not 0 <= len(rows) <= MAX_GRAPH_ROUTERS:
+        raise ValueError(f"The routers field must be a list of 0-{MAX_GRAPH_ROUTERS} routers.")
     routers = []
     for index, row in enumerate(rows):
         if not isinstance(row, dict) or not {"name", "address", "x", "y"} <= row.keys():
@@ -771,6 +773,7 @@ class RoutingDemo:
         self.work_title = tk.StringVar(value="DIJKSTRA WORKING STATE | no calculation yet")
         self.table_title = tk.StringVar()
         self._build_ui()
+        self._refresh_selectors()
         self._refresh_all()
         self._log("Ready. Each router initially knows only its own /32 loopback.")
         for warning in self.asset_warnings:
@@ -796,8 +799,9 @@ class RoutingDemo:
         style.configure("Small.TLabel", font=("Segoe UI", 9), foreground=self.MUTED)
         style.configure("Section.TLabel", font=("Segoe UI", 10, "bold"))
         style.configure("Accent.TButton", foreground="white", background=self.BLUE)
-        style.map("Accent.TButton", background=[("active", self.BRAND), ("pressed", self.BRAND)],
-                  foreground=[("disabled", "#b8cacc"), ("!disabled", "white")])
+        style.map("Accent.TButton", background=[("disabled", "#e3e9ea"),
+                                                ("active", self.BRAND), ("pressed", self.BRAND)],
+                  foreground=[("disabled", "#8a999d"), ("!disabled", "white")])
         style.configure("TButton", background="white", foreground=self.INK,
                         bordercolor=self.BORDER, lightcolor="white", darkcolor=self.BORDER)
         style.map("TButton", background=[("active", "#e2eeee"), ("pressed", "#d0e4e6")])
@@ -840,12 +844,19 @@ class RoutingDemo:
         toolbar = ttk.Frame(header, padding=(0, 7, 0, 0))
         toolbar.grid(row=2, column=0, sticky="ew")
         ttk.Label(toolbar, text="TOPOLOGY", style="Section.TLabel").pack(side="left", padx=(0, 10))
-        for label, command in (("Add router", self.add_router_dialog), ("Add link", self.add_link_dialog),
+        self.topology_buttons: dict = {}
+        for label, command in (("New topology", self.new_topology),
+                               ("Add router", self.add_router_dialog), ("Add link", self.add_link_dialog),
                                ("Save graph", self.save_graph), ("Load graph", self.load_graph),
                                ("Export tables", self.export_tables), ("Reset network", self.reset_network)):
-            ttk.Button(toolbar, text=label, command=command).pack(side="left", padx=(0, 6))
+            button = ttk.Button(toolbar, text=label, command=command)
+            button.pack(side="left", padx=(0, 6))
+            self.topology_buttons[label] = button
         menu = tk.Menu(self.root)
         files = tk.Menu(menu, tearoff=False)
+        self.file_menu = files
+        files.add_command(label="New topology", accelerator="Ctrl+N", command=self.new_topology)
+        files.add_separator()
         files.add_command(label="Save graph", accelerator="Ctrl+S", command=self.save_graph)
         files.add_command(label="Save graph as...", accelerator="Ctrl+Shift+S",
                           command=lambda: self.save_graph(save_as=True))
@@ -863,12 +874,14 @@ class RoutingDemo:
         self.help_menu = help_menu
         self.root.configure(menu=menu)
         self.root.bind("<F1>", lambda event: (self.show_about(), "break")[1])
-        for binding, command in (("<Control-s>", self.save_graph),
+        for binding, command in (("<Control-n>", self.new_topology),
+                                 ("<Control-s>", self.save_graph),
                                  ("<Control-Shift-S>", lambda: self.save_graph(save_as=True)),
                                  ("<Control-o>", self.load_graph)):
             self.root.bind(binding, lambda event, action=command: (action(), "break")[1])
 
         controls = ttk.LabelFrame(outer, text="CONTROL PLANE  |  Dijkstra / shortest-path first", padding=(9, 6))
+        self.spf_controls = controls
         controls.grid(row=1, column=0, sticky="ew", pady=(0, 6))
         ttk.Label(controls, text="Root").pack(side="left")
         self._combo(controls, self.spf_root, list(self.network.routers), 8).pack(side="left", padx=(4, 8))
@@ -885,6 +898,7 @@ class RoutingDemo:
         ttk.Label(controls, text="fast  /  slow", style="Small.TLabel").pack(side="left", padx=4)
 
         links = ttk.Frame(outer)
+        self.link_controls = links
         links.grid(row=2, column=0, sticky="ew", pady=(0, 8))
         ttk.Label(links, text="LINK EDITOR", style="Section.TLabel").pack(side="left", padx=(0, 8))
         selector = self._combo(links, self.link_name,
@@ -924,6 +938,7 @@ class RoutingDemo:
         self.graph_hint.grid(row=2, column=0, sticky="w", pady=(0, 5))
 
         packet_box = ttk.LabelFrame(left, text="DATA PLANE  |  hop-by-hop forwarding", padding=6)
+        self.packet_controls = packet_box
         packet_box.grid(row=3, column=0, sticky="ew", padx=(0, 8), pady=(0, 5))
         row = ttk.Frame(packet_box)
         row.pack(fill="x")
@@ -1337,12 +1352,16 @@ class RoutingDemo:
         self._refresh_all()
 
     def new_spf(self) -> None:
+        if not self._require_router():
+            return
         self._stop_everything()
         self._clear_packet_display()
         self._begin_spf(self.spf_root.get())
         self.tabs.select(self.live_tab)
 
     def step_spf(self) -> None:
+        if not self._require_router():
+            return
         self._pause_spf()
         self._cancel_packet(clear=True)
         if self.iterator is None or (self.step and self.step.source != self.spf_root.get()):
@@ -1352,6 +1371,8 @@ class RoutingDemo:
         self.tabs.select(self.live_tab)
 
     def toggle_spf(self) -> None:
+        if not self._require_router():
+            return
         if self.spf_auto:
             self._pause_spf()
             self._refresh_status()
@@ -1382,6 +1403,8 @@ class RoutingDemo:
         self.spf_job = self.root.after(self._delay(), self._spf_tick)
 
     def finish_router(self) -> None:
+        if not self._require_router():
+            return
         self._pause_spf(clear_queue=True)
         self._cancel_packet(clear=True)
         if self.iterator is None or (self.step and self.step.source != self.spf_root.get()):
@@ -1391,6 +1414,8 @@ class RoutingDemo:
         self._refresh_status()
 
     def animate_all(self) -> None:
+        if not self._require_router():
+            return
         self._stop_everything()
         self._clear_packet_display()
         self.spf_queue = deque(sorted(self.network.routers))
@@ -1401,6 +1426,8 @@ class RoutingDemo:
         self.tabs.select(self.live_tab)
 
     def build_all(self) -> None:
+        if not self._require_router():
+            return
         self._stop_everything()
         self._clear_packet_display()
         self.engine.calculate_all()
@@ -1412,18 +1439,40 @@ class RoutingDemo:
         self._log(f"CONTROL PLANE: built and installed all {count} routing tables.")
         self._refresh_all()
 
+    @staticmethod
+    def _enable_controls(parent, enabled: bool) -> None:
+        """Enable interactive children without changing labels or table contents."""
+        for child in parent.winfo_children():
+            if isinstance(child, ttk.Combobox):
+                child.configure(state="readonly" if enabled else "disabled")
+            elif isinstance(child, (ttk.Button, ttk.Entry, ttk.Checkbutton, ttk.Scale)):
+                child.state(["!disabled"] if enabled else ["disabled"])
+            RoutingDemo._enable_controls(child, enabled)
+
+    def _require_router(self) -> bool:
+        if self.network.routers:
+            return True
+        self.spf_note.set("Empty topology. Use Add router, or double-click the graph, to begin.")
+        self.packet_note.set("Add routers and links, then build the routing tables before sending a packet.")
+        return False
+
     def _refresh_selectors(self) -> None:
         names = sorted(self.network.routers)
+        self._enable_controls(self.spf_controls, bool(names))
+        self._enable_controls(self.packet_controls, bool(names))
+        self._enable_controls(self.link_controls, bool(self.network.links))
+        self.topology_buttons["Add link"].state(["!disabled"] if len(names) >= 2 else ["disabled"])
         for selector in self.router_selectors:
-            selector.configure(values=names)
+            selector.configure(values=names, state="readonly" if names else "disabled")
         for variable in (self.spf_root, self.inspector, self.packet_source, self.packet_target):
             if variable.get() not in self.network.routers:
-                variable.set(names[0])
+                variable.set(names[0] if names else "")
+        if not names:
+            self.destination_ip.set("")
         links = ["-".join(key) for key in sorted(self.network.links)]
         self.link_selector.configure(values=links)
         if self.link_name.get() not in links:
             self.link_name.set(links[0] if links else "")
-        self.apply_link_button.configure(state="normal" if links else "disabled")
         if links:
             self.select_link()
         else:
@@ -1622,9 +1671,12 @@ class RoutingDemo:
         self.apply_link()
 
     def select_target(self, event=None) -> None:
-        self.destination_ip.set(self.network.routers[self.packet_target.get()].address)
+        router = self.network.routers.get(self.packet_target.get())
+        self.destination_ip.set(router.address if router else "")
 
     def inspect_router(self, router: str) -> None:
+        if router not in self.network.routers:
+            return
         self.inspector.set(router)
         self._refresh_route_table()
         self.draw_network()
@@ -1674,6 +1726,8 @@ class RoutingDemo:
         return True
 
     def new_packet(self) -> bool:
+        if not self._require_router():
+            return False
         if ((self.about_window is not None and self.about_window.winfo_exists()) or
                 (self.editor_window is not None and self.editor_window.winfo_exists())):
             return False
@@ -1809,7 +1863,8 @@ class RoutingDemo:
     def _refresh_packet_state(self) -> None:
         packet = self.packet
         if packet is None:
-            self.packet_state.set("No packet | Initial TTL applies to the next new packet.")
+            self.packet_state.set("No packet | Initial TTL applies to the next new packet." if self.network.routers
+                                  else "No packet | Add your first router to get started.")
         else:
             state = ("in transit" if self.packet_animating else packet.outcome.upper())
             self.packet_state.set(
@@ -1820,7 +1875,8 @@ class RoutingDemo:
         self.trace_decisions.clear()
         self._refresh_packet_state()
         self.trace_tree.delete(*self.trace_tree.get_children())
-        self.packet_note.set("Build the routing tables, then create a packet.")
+        self.packet_note.set("Build the routing tables, then create a packet." if self.network.routers
+                             else "Add routers and links, then build the routing tables before sending a packet.")
         self.trace_count = 0
 
     def _delay(self) -> int:
@@ -1864,6 +1920,11 @@ class RoutingDemo:
         self.code_text.configure(state="disabled")
 
     def _refresh_route_table(self) -> None:
+        if not self.network.routers:
+            self.route_tree.delete(*self.route_tree.get_children())
+            self.table_title.set("ROUTING TABLE | no routers")
+            self.table_note.set("Create a router with Add router. Each new router starts with its local /32 route.")
+            return
         old_view = self.route_tree.yview()[0]
         selected = None
         router = self.inspector.get()
@@ -1912,7 +1973,8 @@ class RoutingDemo:
     def _refresh_status(self) -> None:
         self._refresh_packet_state()
         current = sum(self.engine.table_status(name) == "current" for name in self.network.routers)
-        activity = "SPF playing" if self.spf_auto else "packet playing" if self.packet_auto else "ready / paused"
+        activity = ("empty topology" if not self.network.routers else "SPF playing" if self.spf_auto
+                    else "packet playing" if self.packet_auto else "ready / paused")
         self.status_text.set(f"Topology {self.network.revision}  |  SPF tables {current}/{len(self.network.routers)}  |  "
                              f"SPF runs {self.engine.spf_runs}  |  {activity}")
 
@@ -1933,6 +1995,16 @@ class RoutingDemo:
                            font=("Segoe UI", 10, "bold"))
         canvas.create_text(canvas.winfo_width() - 16, 18, anchor="e", text="Link labels = cost, not hop count",
                            fill=self.MUTED, font=("Segoe UI", 9))
+        if not self.network.routers:
+            center_x = max(300, canvas.winfo_width()) / 2
+            center_y = max(170, canvas.winfo_height()) / 2
+            canvas.create_text(center_x, center_y - 12, text="Start your own topology", fill=self.BRAND,
+                               font=("Segoe UI", 17, "bold"), tags=("empty_hint",))
+            canvas.create_text(center_x, center_y + 25,
+                               text="Click Add router or double-click here to add your first node.",
+                               fill=self.MUTED, font=("Segoe UI", 10),
+                               width=max(250, canvas.winfo_width() - 70), tags=("empty_hint",))
+            return
         step = self.step
         tree_edges: set[tuple[str, str]] = set()
         if step and self.packet is None:
@@ -2106,11 +2178,11 @@ class RoutingDemo:
         self.packet_sequence = 0
         self.step_count = 0
         names = sorted(network.routers)
-        self.spf_root.set(names[0])
-        self.inspector.set(names[0])
-        self.packet_source.set(names[0])
-        self.packet_target.set(names[-1])
-        self.destination_ip.set(network.routers[names[-1]].address)
+        self.spf_root.set(names[0] if names else "")
+        self.inspector.set(names[0] if names else "")
+        self.packet_source.set(names[0] if names else "")
+        self.packet_target.set(names[-1] if names else "")
+        self.destination_ip.set(network.routers[names[-1]].address if names else "")
         self.ttl_value.set("16")
         self._refresh_selectors()
         self._clear_packet_display()
@@ -2143,9 +2215,19 @@ class RoutingDemo:
             return False
         self._install_graph(network, Path(chosen))
         self.spf_note.set("Graph loaded. Only local routes are installed. "
-                          "Use Build all now or Animate all to calculate the routing tables.")
+                          "Use Build all now or Animate all to calculate the routing tables." if network.routers
+                          else "Empty graph loaded. Use Add router or double-click the graph to begin.")
         self._log(f"LOADED GRAPH: {chosen}. {len(network.routers)} routers and "
                   f"{len(network.links)} links; previous SPF and packet state cleared.")
+        return True
+
+    def new_topology(self) -> bool:
+        """Start an untitled empty graph after the usual Save / Discard / Cancel check."""
+        if not self._pause_for_file_dialog() or not self._confirm_replace_graph("starting a new topology"):
+            return False
+        self._install_graph(Network([], []))
+        self.spf_note.set("Empty topology. Use Add router, or double-click the graph, to begin.")
+        self._log("NEW TOPOLOGY: started with zero routers and links. Saved graph files are not deleted.")
         return True
 
     def reset_network(self) -> None:
@@ -2163,7 +2245,16 @@ class RoutingDemo:
         self.root.destroy()
 
 
-GUI_GUIDE = """A FIRST WALKTHROUGH
+GUI_GUIDE = """BUILD YOUR OWN TOPOLOGY
+
+Click New topology in the toolbar, choose File > New topology, or press Ctrl+N.
+This clears the current workspace to zero routers and zero links. Save / Discard / Cancel protects unsaved edits. Previously saved graph files are not deleted; the next Save graph asks for a new filename.
+
+Click Add router or double-click the blank canvas. The first suggestion is A (10.0.0.1), with no initial connection. Add more routers and connect them with Add link, or choose an existing neighbor while adding a router. Build all now then calculates each router's table; send packets as usual.
+
+SPF, packet controls and Add link are disabled until enough routers exist. Empty topologies can also be saved and loaded in this version. Reset network still restores the original A-F example; Load graph opens your own saved topology. New topology does not change what is loaded at application startup.
+
+A FIRST WALKTHROUGH
 
 1. Keep root A. Click New SPF, then Step SPF repeatedly.
 

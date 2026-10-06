@@ -2,6 +2,74 @@
 
 Copyright 2026 Ib Helmer Nielsen. Licensed under Apache-2.0.
 
+## Version 1.4.0 - new empty topologies
+
+Validated on 6 October 2026 using CPython 3.13.5, Tkinter/Tk 8.6 on Linux with
+an Xvfb display at 1680 x 1050. The mounted v1.3.1 distribution was checked
+against the connected repository at commit
+`79914d3bf768f0064cfe5c1a6305e24f8cb3409d` before editing; application blob
+`97bd4dc0f360a55fc29d492519195229f0b3ba02`. All 130 baseline tests passed first.
+
+### Scope
+
+Added New topology in the toolbar and File menu, with Ctrl+N. The action uses
+Save / Discard / Cancel, installs an empty Network/RoutingEngine, detaches the
+old filename and clears all SPF, packet, table and trace state. It never deletes
+saved files. An explicitly requested save before clearing may update the current
+file. Cancelled and failed saves abort the replacement.
+
+The Network model now permits zero routers. Unknown link endpoints remain
+invalid; empty graphs must have no links. The JSON format still uses version 1
+and accepts zero-router native files and empty legacy Export tables reports.
+Existing nonempty files remain compatible. Files containing zero routers
+require this application version or later.
+
+SPF and packet controls are disabled on an empty graph; Add link requires at
+least two routers. Callbacks also guard against an empty graph. First-node
+suggestions, drawing instructions, router selectors, table inspection,
+status/TTL display and graph loading handle an empty workspace. The original
+A-F startup example and Reset network behavior are preserved.
+
+### Tests
+
+```text
+DISPLAY=:99 RUN_GUI_TESTS=1 python -m unittest -v
+Ran 160 tests
+OK
+
+python -m unittest -q
+Ran 160 tests
+OK (skipped=72)
+```
+
+There are 88 non-GUI tests and 72 GUI tests. All prior test files are unchanged.
+The 10 new model tests check empty Network/RoutingEngine state, centered first
+suggestions, JSON and file round-trips, legacy empty reports, dangling-link
+rejection, invalid first connections without partial edits, custom routing,
+local delivery at a single node and rejection of unknown Dijkstra roots.
+
+The 20 new Tk tests check button/menu/shortcut entry points, clearing old data,
+Yes/No/Cancel and save errors, retaining existing files, detaching filenames,
+disabled controls and safe callbacks, adding the first node by form or canvas,
+connecting a custom network and forwarding a packet, empty saves/loads,
+reset/load recovery, cancellation of pending animations, preserved SPF on
+Cancel, modal ownership, repeated New and compact-screen visibility.
+
+### Visual and platform limits
+
+Actual running application windows were reviewed at 1440 x 960 and 1180 x 740,
+both with an empty topology and with a custom graph created from scratch.
+The screenshots are application captures, not mockups. All toolbar buttons,
+including New topology, remain visible at the compact size. The original
+`--print-tables` demonstration still delivers A-C-B-D-E-F at cost 10, and
+`--version` reports 1.4.0. All Python files parse with Python 3.10 grammar.
+
+Tests use real Tk widgets and handlers, but native file-chooser return values
+and messagebox answers are mocked. Windows/macOS execution, native icons and
+native file dialogs were not tested; Python versions before 3.13.5 were not
+executed. No network packets are sent. Copyright, licensing and branding
+assets remain unchanged.
+
 ## Version 1.3.1 - non-TTL drop diagnostics and packet setup
 
 Validated on 2 October 2026 with CPython 3.13.5, Linux, Tkinter/Tk 8.6 and Xvfb.

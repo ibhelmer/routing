@@ -4,7 +4,7 @@
 
 Repository: [ibhelmer/routing](https://github.com/ibhelmer/routing)
 
-**Version 1.3.1:** explains packet drops, checks incomplete/stale tables before injection, and separates Initial TTL from the packet's live remaining TTL. About, IHN/UCN branding, editable and saved graphs remain available.
+**Version 1.4.0:** adds **New topology** (Ctrl+N) to start from zero routers and zero links. Build your own network from scratch, or save and reopen an empty graph. Existing routing, drop diagnostics, graph storage, About and IHN/UCN branding are preserved.
 
 An interactive Python teaching example that makes two different activities visible:
 
@@ -13,6 +13,70 @@ An interactive Python teaching example that makes two different activities visib
 **Data plane:** forward a simulated IP packet using a fresh lookup in the current router's installed table at every hop.
 
 The forwarding code does **not** run Dijkstra and does **not** consume a precomputed end-to-end path. The demonstration is self-contained; it sends no real packets and changes no operating-system network settings.
+
+## Start a new topology from scratch
+
+Click **New topology** in the **TOPOLOGY** toolbar, choose **File > New topology**,
+or press **Ctrl+N**. This starts an **untitled, empty graph**: zero routers, zero
+links and no old routing tables or packet trace. It does **not** delete any
+saved graph file from disk.
+
+If the current graph contains unsaved edits, the normal **Save / Discard / Cancel**
+prompt appears first. **Yes** saves those edits before starting over, **No**
+discards only the in-memory edits, and **Cancel** keeps the current graph.
+Cancelling or failing the save also cancels the New topology action. Automatic
+playback is paused; cancelling retains installed tables and unfinished SPF work.
+
+### Build your own network
+
+1. Click **New topology**.
+2. Use **Add router**, or double-click the blank graph, to create the first node.
+   The initial suggestion is **A**, **10.0.0.1**. You may use your own valid name
+   and IPv4 loopback. Its first connection is **(none)** because no other node exists.
+3. Add more routers. Choose an existing neighbor in the Add router dialog or
+   use **Add link** to connect two existing routers and enter a positive cost.
+4. Click **Build all now** or **Animate all**, select Source and Target, and send
+   a packet with **New packet > Play packet**.
+5. Use **Save graph** to keep the new topology for another session.
+
+SPF and packet controls are disabled until at least one router exists. **Add link**
+requires two routers; the existing link editor remains disabled until a link
+exists. Controls and selector lists update immediately as you add nodes and links.
+A single isolated router is valid and can receive a packet addressed to its own
+loopback. Disconnected multi-router networks remain valid failure experiments.
+
+| Action | Result |
+|---|---|
+| **New topology** | Start with an empty, untitled graph. |
+| **Reset network** | Restore the original A-F demonstration with its default costs. |
+| **Load graph** | Replace the workspace with a previously saved topology. |
+
+New topology detaches the old filename, so the next **Save graph** opens a file
+chooser rather than silently overwriting the previous project. An unchanged
+new empty graph has no unsaved marker; adding or moving a node marks it modified.
+An **empty graph can itself be saved and loaded** in v1.4.0. Such a file contains
+`"routers": []` and `"links": []`; old versions that require at least one router
+cannot load it. Existing nonempty graph files remain compatible.
+
+Starting a new graph cancels pending SPF/packet animation callbacks, resets
+packet and calculation state, and clears table and trace views. The event log
+retains its history, including the New topology event. About, logos, keyboard
+help and file actions remain available on the empty canvas. Application startup
+still opens the original demonstration; New topology is an explicit action.
+
+For headless use, begin with `Network([], [])`, attach a `RoutingEngine`, and add
+routers through `engine.add_router(...)` before calculating routes:
+
+```python
+from dijkstra_routing_demo import Network, Router, RoutingEngine, trace_packet
+
+engine = RoutingEngine(Network([], []))
+engine.add_router(Router("Core", "192.0.2.1", 0.2, 0.5))
+engine.add_router(Router("Edge", "192.0.2.2", 0.8, 0.5), connect_to="Core", cost=4)
+engine.calculate_all()
+packet, decisions = trace_packet(engine, "Core", "192.0.2.2")
+assert packet.outcome == "deliver" and packet.total_cost == 4
+```
 
 ## Packet drops with TTL remaining
 
@@ -309,7 +373,7 @@ An example is included at [`examples/seven_router.graph.json`](examples/seven_ro
 
 ### Unsaved changes and failures
 
-A **`*` in the window title** means that topology or drawing positions have changed since the last save or load. Running Dijkstra or forwarding a packet does not mark the graph as modified. Loading, resetting, or closing with unsaved changes prompts:
+A **`*` in the window title** means that topology or drawing positions have changed since the last save or load. Running Dijkstra or forwarding a packet does not mark the graph as modified. Starting a new topology, loading, resetting, or closing with unsaved changes prompts:
 
 - **Yes:** save, then continue. Cancelling or failing that save cancels the pending operation.
 - **No:** discard those edits and continue.
@@ -347,7 +411,7 @@ The native format uses the marker `dijkstra-routing-lab.graph` and schema versio
 }
 ```
 
-Import enforces the same router name/address/position and topology constraints as the editor, including unique names/IPs, known endpoints, no self-links and no parallel links. The file reader additionally requires actual JSON booleans, rejects duplicate JSON fields, non-finite values in graph coordinates, and unknown format versions. Input is bounded to **2 MiB**, **256 routers**, **16,384 links** and link costs from **1 to 1,000,000,000**. These are persistence limits, not a performance guarantee for dense classroom graphs. Graph files are parsed as data; no `pickle`, `eval` or imported code is used.
+Import enforces the same router name/address/position and topology constraints as the editor, including unique names/IPs, known endpoints, no self-links and no parallel links. The file reader additionally requires actual JSON booleans, rejects duplicate JSON fields, non-finite values in graph coordinates, and unknown format versions. Input is bounded to **2 MiB**, **0-256 routers**, **16,384 links** and link costs from **1 to 1,000,000,000**. These are persistence limits, not a performance guarantee for dense classroom graphs. Graph files are parsed as data; no `pickle`, `eval` or imported code is used.
 
 ```python
 from dijkstra_routing_demo import (
@@ -439,10 +503,12 @@ TTL decreases on forwarding and not on local delivery. Drops are logged, but no 
 
 ## Verification
 
-There are **130 tests**: **78 non-GUI tests** and **52 opt-in Tk GUI tests**. The previous 106 tests remain unchanged. `test_packet_diagnostics.py` adds 10 model tests and 14 GUI checks for drop reasons, explicit preflight choices, live TTL, state preservation and compact-screen visibility.
+There are **160 tests**: **88 non-GUI tests** and **72 opt-in Tk GUI tests**.
+All 130 previous tests are unchanged. `test_new_topology.py` adds 10 model tests
+and 20 real-Tk tests for empty graphs and the New topology workflow.
 
 ```bash
-# No graphical display required: 78 pass, 52 GUI checks are skipped.
+# No graphical display required: 88 pass, 72 GUI checks are skipped.
 python -m unittest -v
 
 # With a working graphical desktop:
@@ -452,11 +518,20 @@ RUN_GUI_TESTS=1 python -m unittest -v
 RUN_GUI_TESTS=1 xvfb-run -a python -m unittest -v
 ```
 
-On PowerShell, set `$env:RUN_GUI_TESTS = "1"` before invoking unittest to opt in to GUI tests. Native file-chooser return values and confirmation answers are mocked for repeatability; the Tk application, widgets, callbacks and routing model are real.
+On PowerShell, set `$env:RUN_GUI_TESTS = "1"` before invoking unittest to opt in
+to GUI tests. Native file-chooser results and prompt answers are mocked for
+repeatability; the Tk application, widgets, callbacks and routing model are real.
 
-Storage checks cover full save/load round-trips, 10 randomized 10-router networks and 1,000 before/after packet-route comparisons, malformed JSON, strict field validation, legacy imports, failed save cleanup, single-node/zero-link loading, state reset, pending-animation cancellation, Save As, dirty tracking, and cancellation/failure before replacing a graph. Loading the current file after saving pending edits is checked to keep disk and memory consistent.
+Tests cover Dijkstra and independent reference comparisons, routing tables,
+TTL and non-TTL drops, dynamic editing, save/load, invalid files, failed saves,
+About and logo handling, and creation of custom networks from an empty graph.
+New tests also cover the button, menu and shortcut, save/discard/cancel,
+old-file preservation, empty-graph persistence, modal ownership, stopping old
+animation callbacks, disabled controls and subsequent re-enabling, and a
+compact-screen empty canvas.
 
-See `VALIDATION.md` for the actual environment and limits of verification. Native Windows and macOS execution were not available for this update.
+See `VALIDATION.md` for the actual environment and limits of verification.
+Native Windows and macOS execution were not available for this update.
 
 ## Primary references
 
@@ -479,6 +554,7 @@ The implementation is an original teaching example based on the principles below
 | `test_topology_editor.py` | 15 additional model tests and 10 opt-in graphical tests |
 | `test_graph_storage.py` | 21 storage/model tests and 13 opt-in graphical tests |
 | `test_branding.py` | 5 asset/metadata tests and 15 opt-in graphical tests |
+| `test_new_topology.py` | 10 empty-network tests and 20 opt-in graphical workflow tests |
 | `test_packet_diagnostics.py` | 10 drop/TTL model tests and 14 opt-in graphical tests |
 | `assets/` | IHN PNG/ICO, original UCN SVG, Tk-compatible PNG and provenance |
 | `examples/seven_router.graph.json` | Loadable example with G connected to F at cost 3 |
