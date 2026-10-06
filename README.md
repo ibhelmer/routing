@@ -4,7 +4,7 @@
 
 Repository: [ibhelmer/routing](https://github.com/ibhelmer/routing)
 
-**Version 1.4.0:** adds **New topology** (Ctrl+N) to start from zero routers and zero links. Build your own network from scratch, or save and reopen an empty graph. Existing routing, drop diagnostics, graph storage, About and IHN/UCN branding are preserved.
+**Version 1.5.0:** adds **Delete router** and **Delete link**, with confirmation, removal of attached links, safe cleanup of routing/packet state and support for deleting the last router. New topology, graph storage, drop diagnostics and IHN/UCN branding remain available.
 
 An interactive Python teaching example that makes two different activities visible:
 
@@ -13,6 +13,90 @@ An interactive Python teaching example that makes two different activities visib
 **Data plane:** forward a simulated IP packet using a fresh lookup in the current router's installed table at every hop.
 
 The forwarding code does **not** run Dijkstra and does **not** consume a precomputed end-to-end path. The demonstration is self-contained; it sends no real packets and changes no operating-system network settings.
+
+## Delete routers and links
+
+### Delete a router (node)
+
+Click the router on the graph, or choose it under **Inspect router** in **Live view**.
+Click **Delete router** next to that selector. **Edit > Delete inspected router...**
+performs the same action. The confirmation displays the router's **name, IPv4
+loopback and number of attached links**; **No** is the default.
+
+Confirming removes that router **and all its attached links**. Other routers keep
+their names, addresses and drawing positions. Deleting the last router is allowed
+and leaves the same empty workspace used by New topology. Source, Target, Root,
+Inspect router and the link selector are repaired immediately. If the selected
+Target was removed, Dest. IP changes to the replacement Target's loopback; custom
+Dest. IP input is retained when the selected Target survives.
+
+The button deletes the **inspected router**, not a highlighted destination row in
+its routing table. It is a topology editing operation, not a manual route-entry
+editor. To remove all routers at once, use **New topology** instead.
+
+### Delete a link
+
+Click a link's **cost label**, or select its name under **LINK EDITOR**. Click
+**Delete link** beside **Apply change**, or choose **Edit > Delete selected link...**.
+The confirmation identifies the endpoints and cost. Both routers are retained;
+only the connection is removed. The endpoints can become isolated.
+
+| Operation | Topology effect | Routing behavior |
+|---|---|---|
+| **Delete router** | Remove the router and every attached link. | Clear computed routes on surviving routers. |
+| **Delete link** | Remove the connection; keep its routers. | Clear computed routes on all routers. |
+| Untick **Link up**, then **Apply change** | Keep a link in the topology, but mark it down. | Retain stale installed tables for a failure/convergence lesson. |
+
+**Deletion does not run Dijkstra automatically.** After a deletion, use
+**Build all now** or **Animate all** before sending a new packet. Only local /32
+routes remain until SPF is completed. Clearing computed routes avoids retaining
+references to removed destinations, next hops or old shortest-path trees. The
+**SPF runs** counter retains its historical total; it does not increase because
+of deletion. Packet creation still offers the normal explicit setup choice.
+
+Confirmed deletion stops pending SPF and packet animations, abandons incomplete
+SPF work and clears the current packet and trace. The Event log records the edit.
+**No** or closing the confirmation keeps the graph, installed routes, current
+packet and unfinished SPF iterator/queue; playback remains paused. About or an
+open router/link editor must be closed before requesting deletion.
+
+### Saved graphs and recovery
+
+Deletion changes the **in-memory graph**, shows the unsaved `*` marker and keeps
+its current filename. It does **not** delete or rewrite saved files until an
+explicit **Save graph**. Normal Save / Discard / Cancel protection applies when
+loading another graph, starting a new topology, resetting or closing.
+
+There is **no Undo command**. Reload a previously saved copy to restore that
+copy's contents, or use Add router / Add link to recreate an item. Save a separate
+copy first when experimenting. Empty graphs and graphs with isolated routers
+can still be saved and reloaded.
+
+### Deletion from Python
+
+Use the engine methods when a RoutingEngine already exists. They update topology
+and clear invalid computed state together. Network.remove_router/remove_link
+are lower-level methods for networks not yet attached to an engine.
+
+```python
+from dijkstra_routing_demo import RoutingEngine, make_default_network, trace_packet
+
+engine = RoutingEngine(make_default_network())
+engine.calculate_all()
+engine.remove_link("D", "E")     # Retain D and E; remove the link in both directions.
+engine.calculate_all()            # Rebuild explicitly.
+packet, _ = trace_packet(engine, "A", "10.0.0.6")
+assert packet.path == ["A", "C", "E", "F"] and packet.total_cost == 11
+
+removed_links = engine.remove_router("C")  # Also removes all links touching C.
+engine.calculate_all()
+```
+
+Unknown routers/links, self-links and invalid endpoints raise ValueError without
+partially changing the network or installed routing tables. A router deletion
+increments the topology revision once, even when several links are removed.
+Reversed endpoint order is accepted for link deletion. Deleted names and
+addresses can be reused when recreating routers.
 
 ## Start a new topology from scratch
 
@@ -503,12 +587,15 @@ TTL decreases on forwarding and not on local delivery. Drops are logged, but no 
 
 ## Verification
 
-There are **160 tests**: **88 non-GUI tests** and **72 opt-in Tk GUI tests**.
-All 130 previous tests are unchanged. `test_new_topology.py` adds 10 model tests
-and 20 real-Tk tests for empty graphs and the New topology workflow.
+There are **195 tests**: **103 non-GUI tests** and **92 opt-in Tk GUI tests**.
+The previous 160 tests remain unchanged. `test_topology_deletion.py` adds 15
+model tests and 20 real-Tk tests for structural deletion, clearing computed
+state, confirmations, persistence, selector repair and compact-screen controls.
+The randomized deletion test compares routes against independent Bellman-Ford
+calculations after each deletion in eight seeded edit sequences.
 
 ```bash
-# No graphical display required: 88 pass, 72 GUI checks are skipped.
+# No graphical display required: 103 pass, 92 GUI checks are skipped.
 python -m unittest -v
 
 # With a working graphical desktop:
@@ -525,7 +612,7 @@ repeatability; the Tk application, widgets, callbacks and routing model are real
 Tests cover Dijkstra and independent reference comparisons, routing tables,
 TTL and non-TTL drops, dynamic editing, save/load, invalid files, failed saves,
 About and logo handling, and creation of custom networks from an empty graph.
-New tests also cover the button, menu and shortcut, save/discard/cancel,
+The new-topology tests also cover the button, menu and shortcut, save/discard/cancel,
 old-file preservation, empty-graph persistence, modal ownership, stopping old
 animation callbacks, disabled controls and subsequent re-enabling, and a
 compact-screen empty canvas.
@@ -554,6 +641,7 @@ The implementation is an original teaching example based on the principles below
 | `test_topology_editor.py` | 15 additional model tests and 10 opt-in graphical tests |
 | `test_graph_storage.py` | 21 storage/model tests and 13 opt-in graphical tests |
 | `test_branding.py` | 5 asset/metadata tests and 15 opt-in graphical tests |
+| `test_topology_deletion.py` | 15 model tests and 20 opt-in graphical deletion tests |
 | `test_new_topology.py` | 10 empty-network tests and 20 opt-in graphical workflow tests |
 | `test_packet_diagnostics.py` | 10 drop/TTL model tests and 14 opt-in graphical tests |
 | `assets/` | IHN PNG/ICO, original UCN SVG, Tk-compatible PNG and provenance |

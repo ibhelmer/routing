@@ -2,6 +2,77 @@
 
 Copyright 2026 Ib Helmer Nielsen. Licensed under Apache-2.0.
 
+## Version 1.5.0 - delete routers and links
+
+Validated on 6 October 2026 with CPython 3.13.5, Tkinter/Tk 8.6 on Linux, using
+an Xvfb display at 1680 x 1050. The mounted v1.4.0 application was checked against
+the connected GitHub repository at commit
+`efa2867eb1c19a7d7c16f2fda11734a1d30d70bc`; its blob SHA was
+`ed02aae50323905b7a5073990ba118699894c213`.
+
+### Behavior and scope
+
+Delete router is beside Inspect router in Live view. Delete link is beside
+Apply change in LINK EDITOR. The Edit menu exposes both actions. Confirmation
+identifies the selected item, explains the consequences and defaults to No.
+Router deletion removes all incident links in one topology revision. Link
+deletion keeps its endpoints. Deleting the last router returns an empty canvas.
+
+RoutingEngine removal methods clear computed routes and old SPF snapshots;
+surviving routers retain only their local /32 entries. No Dijkstra run is hidden
+inside deletion. The completed-SPF counter keeps its historical value.
+Confirmed deletion clears packet/trace state and cancels pending callbacks.
+Cancelled deletion retains graph, tables, packet and unfinished SPF work,
+with playback paused. Link up/down experiments continue to retain stale tables.
+
+No saved file is changed by deletion itself. The filename association remains,
+so a later explicit Save graph writes the edited topology. There is no Undo.
+No manual deletion of an individual routing-table destination was added.
+
+### Test results
+
+```text
+DISPLAY=:99 RUN_GUI_TESTS=1 python -m unittest -q
+Ran 195 tests in 26.194s
+OK
+
+python -m unittest -q
+Ran 195 tests in 0.907s
+OK (skipped=92)
+```
+
+All prior test files are unchanged. There are 103 non-GUI and 92 GUI tests.
+The new 15 model tests cover one-revision removal of incident links, reversed
+link endpoints, invalid/repeated requests without partial mutations, route
+invalidation without SPF, old-snapshot rejection, deleting the last router,
+reusing names and IPs, isolated destinations, JSON round-trips and expected
+alternative paths. Eight seeded deletion sequences compare every remaining
+source and destination against independent Bellman-Ford distances after each
+edit, continuing until the graph is empty.
+
+The new 20 real-Tk checks cover both buttons and menu entries, the confirmation
+wording/default, Yes/No behavior, selection versus a routing-table row, source/
+root/target repair, preserved custom IP input, modal ownership, deleting during
+SPF or packet animation, callbacks and trace cleanup, empty-state disabling,
+recreating the first router, saved-file preservation until explicit Save,
+save/load followed by forwarding, unsaved protection and compact layout.
+
+`--version` reports 1.5.0. The unchanged console example delivers A-C-B-D-E-F
+with cost 10 and remaining TTL 11. Every Python source parses with Python 3.10
+grammar; older Python interpreters were not executed.
+
+### Visual review and limitations
+
+Actual running application windows were captured and visually inspected at
+1440 x 960 and 1180 x 740. Delete link and Delete router are visible without
+adding more buttons to the crowded topology toolbar. A separate capture shows
+D and its attached links removed with the remaining local-only routing state.
+Existing logos and other branding assets were not changed.
+
+Tests exercise real Tk widgets and callback code, with confirmation answers
+and file-chooser return values mocked. Native Windows/macOS execution, native
+messageboxes/file dialogs and operating-system icon rendering were not tested.
+
 ## Version 1.4.0 - new empty topologies
 
 Validated on 6 October 2026 using CPython 3.13.5, Tkinter/Tk 8.6 on Linux with

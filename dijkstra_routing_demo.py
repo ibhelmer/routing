@@ -44,7 +44,7 @@ import webbrowser
 __author__ = "Ib Helmer Nielsen"
 __copyright__ = "Copyright 2026 Ib Helmer Nielsen"
 __license__ = "Apache-2.0"
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 
 APP_NAME = "Dijkstra Routing Lab"
 REPOSITORY_URL = "https://github.com/ibhelmer/routing"
@@ -161,6 +161,32 @@ class Network:
         if link.key in self.links:
             raise ValueError("This link already exists. Use the link editor to change its cost or state.")
         self.links[link.key] = link
+        self.revision += 1
+
+    def remove_router(self, name: str) -> tuple[tuple[str, str], ...]:
+        """Remove a router and all incident links as one topology revision.
+
+        Use RoutingEngine.remove_router when an engine already owns the network.
+        Return the removed link keys for logging. Invalid requests change nothing.
+        """
+        if not isinstance(name, str) or name not in self.routers:
+            raise ValueError(f"Unknown router: {name}")
+        incident = tuple(key for key in sorted(self.links) if name in key)
+        for key in incident:
+            del self.links[key]
+        del self.routers[name]
+        self.revision += 1
+        return incident
+
+    def remove_link(self, a: str, b: str) -> None:
+        """Delete a link, not just disable it. Keep both endpoint routers."""
+        if (not isinstance(a, str) or not isinstance(b, str)
+                or a == b or a not in self.routers or b not in self.routers):
+            raise ValueError("Choose two different, existing routers.")
+        key = tuple(sorted((a, b)))
+        if key not in self.links:
+            raise ValueError(f"No link exists between {a} and {b}.")
+        del self.links[key]
         self.revision += 1
 
     def move_router(self, name: str, x: float, y: float) -> None:
@@ -521,6 +547,31 @@ class RoutingEngine:
         self.tables[router.name] = {router.name: Route(router.name, router.prefix, None, 0)}
         self.versions[router.name] = None
 
+    def _clear_routes_after_deletion(self) -> None:
+        """Invalidate computed routes after structural deletion, without running SPF.
+
+        A topology editor deletion is not a timed link-state failure experiment:
+        remove dangling next hops, deleted destinations and old SPF snapshots.
+        The completed-SPF counter remains a session history, not a table version.
+        """
+        self.tables = {
+            name: {name: Route(name, router.prefix, None, 0)}
+            for name, router in self.network.routers.items()
+        }
+        self.versions = {name: None for name in self.network.routers}
+        self.results.clear()
+
+    def remove_router(self, name: str) -> tuple[tuple[str, str], ...]:
+        """Delete one router plus its links; leave only local routes at survivors."""
+        incident = self.network.remove_router(name)
+        self._clear_routes_after_deletion()
+        return incident
+
+    def remove_link(self, a: str, b: str) -> None:
+        """Delete one link and invalidate computed routes, without inventing a path."""
+        self.network.remove_link(a, b)
+        self._clear_routes_after_deletion()
+
     def install(self, step: DijkstraStep, revision: int) -> None:
         if step.phase != "finish":
             raise ValueError("Do not install an unfinished SPF calculation.")
@@ -805,6 +856,9 @@ class RoutingDemo:
         style.configure("TButton", background="white", foreground=self.INK,
                         bordercolor=self.BORDER, lightcolor="white", darkcolor=self.BORDER)
         style.map("TButton", background=[("active", "#e2eeee"), ("pressed", "#d0e4e6")])
+        style.configure("Danger.TButton", foreground=self.RED)
+        style.map("Danger.TButton", foreground=[("disabled", "#8b969a"), ("!disabled", self.RED)],
+                  background=[("active", "#fde7e7"), ("pressed", "#f9d1d1")])
         style.configure("Brand.TFrame", background="white")
         style.configure("BrandTitle.TLabel", background="white", foreground=self.BRAND,
                         font=("Segoe UI", 22, "bold"))
@@ -867,6 +921,10 @@ class RoutingDemo:
         files.add_separator()
         files.add_command(label="Exit", command=self.close)
         menu.add_cascade(label="File", menu=files)
+        self.edit_menu = tk.Menu(menu, tearoff=False)
+        self.edit_menu.add_command(label="Delete inspected router...", command=self.delete_router)
+        self.edit_menu.add_command(label="Delete selected link...", command=self.delete_link)
+        menu.add_cascade(label="Edit", menu=self.edit_menu)
         help_menu = tk.Menu(menu, tearoff=False)
         help_menu.add_command(label="About Dijkstra Routing Lab...", accelerator="F1", command=self.show_about)
         menu.add_cascade(label="Help", menu=help_menu)
@@ -911,7 +969,10 @@ class RoutingDemo:
         ttk.Checkbutton(links, text="Link up", variable=self.link_up).pack(side="left", padx=8)
         self.apply_link_button = ttk.Button(links, text="Apply change", command=self.apply_link)
         self.apply_link_button.pack(side="left")
-        ttk.Label(links, text="Changes leave installed tables stale until SPF runs again.",
+        self.delete_link_button = ttk.Button(links, text="Delete link", command=self.delete_link,
+                                             style="Danger.TButton")
+        self.delete_link_button.pack(side="left", padx=(8, 0))
+        ttk.Label(links, text="Link edits need SPF. Deletion clears computed routes.",
                   style="Small.TLabel").pack(side="left", padx=12)
 
         body = ttk.Panedwindow(outer, orient="horizontal")
@@ -1002,7 +1063,9 @@ class RoutingDemo:
         inspect = self._combo(row, self.inspector, list(self.network.routers), 8)
         inspect.pack(side="left", padx=6)
         inspect.bind("<<ComboboxSelected>>", lambda event: self.inspect_router(self.inspector.get()))
-        ttk.Label(row, text="Double outline on the map", style="Small.TLabel").pack(side="left", padx=4)
+        self.delete_router_button = ttk.Button(row, text="Delete router", command=self.delete_router,
+                                               style="Danger.TButton")
+        self.delete_router_button.pack(side="right")
         ttk.Label(live, textvariable=self.work_title, style="Section.TLabel").grid(row=1, column=0, sticky="w")
         self.work_tree = self._tree(live,
             [("router", "Node", 46), ("cost", "Cost", 55), ("parent", "Previous", 70),
@@ -1457,7 +1520,11 @@ class RoutingDemo:
         return False
 
     def _refresh_selectors(self) -> None:
+        previous_target = self.packet_target.get()
         names = sorted(self.network.routers)
+        self.delete_router_button.state(["!disabled"] if names else ["disabled"])
+        self.edit_menu.entryconfigure(0, state="normal" if names else "disabled")
+        self.edit_menu.entryconfigure(1, state="normal" if self.network.links else "disabled")
         self._enable_controls(self.spf_controls, bool(names))
         self._enable_controls(self.packet_controls, bool(names))
         self._enable_controls(self.link_controls, bool(self.network.links))
@@ -1469,6 +1536,10 @@ class RoutingDemo:
                 variable.set(names[0] if names else "")
         if not names:
             self.destination_ip.set("")
+        elif previous_target not in self.network.routers:
+            # A deleted Target must not leave its old address in Dest. IP. Keep
+            # custom destination input intact when the selected Target survives.
+            self.select_target()
         links = ["-".join(key) for key in sorted(self.network.links)]
         self.link_selector.configure(values=links)
         if self.link_name.get() not in links:
@@ -1479,14 +1550,20 @@ class RoutingDemo:
             self.link_cost.set("1")
             self.link_up.set(False)
 
-    def _topology_changed(self, message: str) -> None:
+    def _topology_changed(self, message: str, *, routes_cleared: bool = False) -> None:
         self._stop_everything()
         self._clear_packet_display()
         self.step = None
         self.drag_router = None
         self._refresh_selectors()
-        self.spf_note.set("Topology changed. Existing tables are STALE; new routers know only their own loopback. "
-                          "Use Build all now or Animate all before forwarding to a new destination.")
+        if not self.network.routers:
+            self.spf_note.set("Empty topology. Use Add router, or double-click the graph, to begin.")
+        elif routes_cleared:
+            self.spf_note.set("Topology item deleted. Computed routes were cleared; only local routes remain. "
+                              "Use Build all now or Animate all before forwarding between routers.")
+        else:
+            self.spf_note.set("Topology changed. Existing tables are STALE; new routers know only their own loopback. "
+                              "Use Build all now or Animate all before forwarding to a new destination.")
         self._log(f"TOPOLOGY revision {self.network.revision}: {message} No automatic SPF.")
         self._refresh_all()
 
@@ -1609,6 +1686,49 @@ class RoutingDemo:
             ("cost", "Link cost", "1", None),
         ], submit, "Links are bidirectional. Choose two different routers and a positive integer cost. "
            "Use the existing link editor to update a link that is already present.")
+
+    def delete_router(self) -> bool:
+        """Confirm deletion of the inspected router, including every attached link."""
+        if not self._pause_for_file_dialog():
+            return False
+        name = self.inspector.get()
+        if name not in self.network.routers:
+            return False
+        router = self.network.routers[name]
+        count = sum(name in key for key in self.network.links)
+        if not messagebox.askyesno(
+                "Delete router", f"Delete router {name} ({router.address}/32)?\n\n"
+                f"This also deletes its {count} attached link(s).\n"
+                "Computed routing tables and the current packet trace will be cleared.\n"
+                "There is no Undo. Saved graph files stay unchanged until you save.",
+                parent=self.root, icon="warning", default="no"):
+            return False
+        self.engine.remove_router(name)
+        self._topology_changed(f"Deleted router {name} and {count} attached link(s). "
+                               "Computed routes cleared.", routes_cleared=True)
+        return True
+
+    def delete_link(self) -> bool:
+        """Confirm permanent removal of the selected link, keeping its endpoints."""
+        if not self._pause_for_file_dialog():
+            return False
+        selected = self.link_name.get()
+        key = next((key for key in self.network.links if "-".join(key) == selected), None)
+        if key is None:
+            return False
+        link = self.network.links[key]
+        if not messagebox.askyesno(
+                "Delete link", f"Delete link {link.a}-{link.b} (cost {link.cost})?\n\n"
+                "Both routers will remain in the graph.\n"
+                "Computed routing tables and the current packet trace will be cleared.\n"
+                "For a temporary failure, use Link up instead.\n"
+                "There is no Undo. Saved graph files stay unchanged until you save.",
+                parent=self.root, icon="warning", default="no"):
+            return False
+        self.engine.remove_link(*key)
+        self._topology_changed(f"Deleted link {selected}; endpoint routers retained. "
+                               "Computed routes cleared.", routes_cleared=True)
+        return True
 
     def _canvas_position(self, x: float, y: float) -> tuple[float, float]:
         width, height = max(self.canvas.winfo_width(), 300), max(self.canvas.winfo_height(), 170)
@@ -2245,7 +2365,17 @@ class RoutingDemo:
         self.root.destroy()
 
 
-GUI_GUIDE = """BUILD YOUR OWN TOPOLOGY
+GUI_GUIDE = """DELETE ROUTERS AND LINKS
+
+Click a router on the graph, or select it in Inspect router (Live view). Click Delete router beside the selector, or use Edit > Delete inspected router. Confirm its name and IP before deleting it. All attached links are removed too. Deleting the last router leaves an empty topology.
+
+Click a link's cost, or select it in LINK EDITOR. Click Delete link, or use Edit > Delete selected link. Both endpoint routers remain. For a temporary link failure, untick Link up instead of deleting the link.
+
+Deletion pauses playback, clears the current packet/trace and computed routing tables, and leaves only each surviving router's local route. Use Build all now or Animate all before sending a new packet. No SPF is run automatically by the deletion itself. Cancel keeps the graph, routes, packet and unfinished SPF work, with playback paused.
+
+Deletion marks the graph as modified but does not change saved files until Save graph. There is no Undo command. Reload a previous saved copy to restore its contents, or add the item again. Reset network restores the original A-F example.
+
+BUILD YOUR OWN TOPOLOGY
 
 Click New topology in the toolbar, choose File > New topology, or press Ctrl+N.
 This clears the current workspace to zero routers and zero links. Save / Discard / Cancel protects unsaved edits. Previously saved graph files are not deleted; the next Save graph asks for a new filename.
